@@ -270,6 +270,68 @@ All traces match token-for-token between reference and attention executors.
 | 4 | Do the primitives compose? | Yes | FF routing is the bottleneck, not attention |
 | 5 | Can gradient descent learn execution? | Partially | Learns structure (56%), not perfect arithmetic |
 
+---
+
+## Phase 6: Curriculum Learning
+
+**Result: YES — curriculum learning significantly improves execution accuracy. 81% token accuracy (vs 56% baseline), 23/50 perfect traces (vs 0/50).**
+
+### Hypothesis
+Phase 5's gap exists because the model must simultaneously learn state tracking AND arithmetic. Decompose via curriculum: teach trivial routing first, then incrementally add complexity.
+
+### Three stages
+
+| Stage | Instructions | Target | Val Acc | Perfect | Final OK |
+|-------|-------------|--------|---------|---------|----------|
+| 1 | PUSH + HALT | >95% | 57% | 0/50 | 1/50 |
+| 2 | PUSH + POP + DUP + HALT | >85% | 67% | 6/50 | 9/50 |
+| 3 | Full set (+ ADD) | >70% | **81%** | **23/50** | **35/50** |
+
+### Comparison with Phase 5 baseline
+
+| Metric | Phase 5 | Phase 6 Stage 3 | Delta |
+|--------|---------|-----------------|-------|
+| Val token accuracy | 56% | 81% | **+25pp** |
+| Perfect traces | 0/50 | 23/50 | **+23** |
+| Final value correct | 5/50 | 35/50 | **+30** |
+
+### Key findings
+
+1. **Curriculum learning works.** The +25pp accuracy gain and 0→23 perfect traces is a qualitative breakthrough. The same 137K-param model that couldn't produce a single correct trace now executes complete programs correctly nearly half the time.
+
+2. **Transfer learning compounds.** Each stage builds meaningfully on the previous. Stage 2 starts where Stage 1 left off and immediately benefits from the learned token structure. Stage 3 starts at 67% and climbs to 81%.
+
+3. **Stage 1 underperformed (57% vs 95% target).** Even PUSH-only programs — the simplest possible routing — require non-trivial position-dependent value copying. The model must learn that TOP = the most recent PUSH argument, and SP = step count. This is harder than expected because the numeric values are arbitrary (0-50), so the FF layer can't just memorize — it must learn a general copy mechanism.
+
+4. **Stage 3 met its target.** Despite Stage 1 and 2 missing their targets, Stage 3 exceeded 70%. The curriculum provides a better optimization landscape even when individual stages don't reach ceiling performance.
+
+5. **Total training time: ~147s on CPU.** All three stages completed comfortably within compute limits. The 137K model trains at ~1s/epoch.
+
+### Interpretation
+
+The Phase 5 finding was "the model learns structure but not arithmetic." Phase 6 shows this was partly a learning-order problem, not just a capacity problem. By staging instruction complexity, the FF layers learn crisp routing for simple cases first, then refine for harder cases.
+
+However, 81% token accuracy and 23/50 perfect traces means the model still makes errors — particularly on longer programs and ADD operations where two stack values must be retrieved and summed. The remaining gap likely requires either more parameters or more training data.
+
+### Open questions
+- Why does Stage 1 plateau at 57%? Is the bottleneck value memorization, position encoding, or SP tracking?
+- Would more training data (>1000 samples) or more epochs help Stage 1 converge?
+- Would a wider model (d=128) with curriculum reach near-perfect execution?
+
+---
+
+## Updated Summary: All Phases
+
+| Phase | Question | Answer | Key Constraint |
+|-------|----------|--------|----------------|
+| 1 | Does hull query scale O(log t)? | Yes | Ternary search required, not hull scan |
+| 2 | Does parabolic indexing work? | Yes | float32 limit ~4K indices (revised down) |
+| 2b | Can we extend the address limit? | Yes | Residual addressing: 25M from 2 heads |
+| 3 | Is cumsum via attention stable? | Yes | 100K+ steps in float32 |
+| 4 | Do the primitives compose? | Yes | FF routing is the bottleneck, not attention |
+| 5 | Can gradient descent learn execution? | Partially | Learns structure (56%), not perfect arithmetic |
+| 6 | Does curriculum learning help? | **Yes** | 56%→81% accuracy, 0→23 perfect traces |
+
 ## Key Insight Across All Phases
 
 The consistent finding: **attention is the easy part; feed-forward routing is the hard part.** The 2D convex hull attention primitives (parabolic indexing, cumsum) are elegant and compose cleanly. But the conditional logic that maps opcodes to different computations — the "if PUSH then route arg to stack; if ADD then read two values and sum" — is where model capacity actually goes. This is true both in the hand-wired design (Phase 4) and in training (Phase 5).
@@ -283,4 +345,5 @@ Percepta's d_model=36, n_heads=18, n_layers=7 architecture is probably 80% FF ro
 - phase3_cumsum.py — Cumulative sum tests
 - phase4_stack_machine.py — Stack machine composition test
 - phase5_training.py — Training experiments
+- phase6_curriculum.py — Curriculum learning experiment
 - viz/phase1-results.jsx — Phase 1 visualization (React)
