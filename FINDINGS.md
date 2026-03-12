@@ -56,6 +56,42 @@ Blog: https://percepta.ai/blog/can-llms-be-computers
 
 ---
 
+## Phase 2b: Breaking the Float32 Address Limit
+
+**Result: Residual (bit-split) addressing extends range to 25M+ from just 2 attention heads.**
+
+### Motivation
+Phase 2 found ~7K addressable indices in float32. For WASM-scale execution (Phase 6), this is far too limiting. Explored three workarounds.
+
+### Re-measured baseline
+More rigorous testing found the safe breakpoint is actually ~4K (not ~7.3K as in Phase 2). Phase 2's measurement was optimistic because numpy's vectorized ops have better intermediate precision than the worst case.
+
+### Approaches tested
+
+| Approach | Mechanism | Addressable | Heads | Errors |
+|----------|-----------|-------------|-------|--------|
+| Standard parabolic | k=(2j, -j²) | ~4K | 1 | 0% up to limit |
+| Offset parabolas | k=(2(j-c), -(j-c)²), tiled | 3K × N_heads | N | 0% with 3K segments |
+| **Residual (bit-split)** | **block=addr//B, offset=addr%B** | **B² (=25M for B=5K)** | **2** | **0%** |
+
+### Residual addressing detail
+- Split address into (block_index, offset_within_block)
+- Head A: parabolic lookup on block indices → selects which block
+- Head B: parabolic lookup on offsets within selected block → selects entry
+- FF layer combines both heads' outputs
+- B=5000 is well within float32 safe range → 25M addressable range
+- Stress tested: 330 addresses spanning 0..25M, zero errors
+
+### Key insight
+This is likely what Percepta uses. Their d_model=36 with 18 heads can dedicate 2 heads to block/offset addressing and still have 16 heads for other roles. The FF layer routing for the combination adds modest complexity.
+
+### Impact on later phases
+- Phase 5 (training): standard parabolic is sufficient — toy programs won't need >4K stack depth
+- Phase 6 (WASM): residual addressing is the path to realistic memory sizes
+- Training challenge: the model must learn the bit-split decomposition, which is a harder optimization target than plain parabolic
+
+---
+
 ## Phase 3: Cumulative Sum via Attention
 
 **Result: Surprisingly robust. No integer errors at 100K steps even in float32.**
@@ -167,7 +203,8 @@ All traces match token-for-token between reference and attention executors.
 | Phase | Question | Answer | Key Constraint |
 |-------|----------|--------|----------------|
 | 1 | Does hull query scale O(log t)? | Yes | Ternary search required, not hull scan |
-| 2 | Does parabolic indexing work? | Yes | float32 limit ~7K indices |
+| 2 | Does parabolic indexing work? | Yes | float32 limit ~4K indices (revised down) |
+| 2b | Can we extend the address limit? | Yes | Residual addressing: 25M from 2 heads |
 | 3 | Is cumsum via attention stable? | Yes | 100K+ steps in float32 |
 | 4 | Do the primitives compose? | Yes | FF routing is the bottleneck, not attention |
 
@@ -180,6 +217,7 @@ All traces match token-for-token between reference and attention executors.
 ## Files
 - phase1_hull_cache.py — Hull cache benchmarks
 - phase2_parabolic.py — Precision tests
+- phase2b_address_limits.py — Extended addressing exploration
 - phase3_cumsum.py — Cumulative sum tests
 - phase4_stack_machine.py — Stack machine composition test
 - viz/phase1-results.jsx — Phase 1 visualization (React)

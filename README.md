@@ -18,7 +18,8 @@ They released no code or weights. This repo independently tests whether the core
 | Phase | Description | Status | Key Finding |
 |-------|------------|--------|-------------|
 | 1 | Convex hull KV cache scaling | ✅ Done | O(log t) confirmed via ternary search. 35× speedup at 50K steps. |
-| 2 | Parabolic key encoding precision | ✅ Done | Float32 breaks at index ~7,300. Float64 safe to ~67M. |
+| 2 | Parabolic key encoding precision | ✅ Done | Float32 breaks at index ~4K (revised). Float64 safe to ~200K+. |
+| 2b | Extended addressing | ✅ Done | Residual (bit-split) addressing: 25M range from 2 heads. |
 | 3 | Cumulative sum via attention | ✅ Done | Rock-solid — zero integer errors at 100K in float32. |
 | 4 | Hand-wired stack machine | ✅ Done | Primitives compose. 10/10 test programs execute correctly via attention only. |
 | 5 | Trained micro-executor | 🔲 Todo | Can gradient descent discover the optimal attention structure? |
@@ -28,9 +29,10 @@ They released no code or weights. This repo independently tests whether the core
 
 ```
 RD-PLAN.md                  # Full R&D plan (6 phases)
-FINDINGS.md                 # Combined findings from Phases 1-4
+FINDINGS.md                 # Combined findings from Phases 1-4, 2b
 phase1_hull_cache.py        # Convex hull vs brute force benchmarks
 phase2_parabolic.py         # Parabolic encoding precision tests
+phase2b_address_limits.py   # Extended addressing exploration
 phase3_cumsum.py            # Cumulative sum stability tests
 phase4_stack_machine.py     # Stack machine via attention primitives
 viz/phase1-results.jsx      # Phase 1 interactive visualization (React)
@@ -50,7 +52,7 @@ Requires: numpy, scipy (for convex hull verification only — the fast path uses
 ## Key Takeaways
 
 - **The geometry works.** Parabolic keys + ternary search give exact O(log n) index lookup.
-- **Float32 is the bottleneck.** ~7K addressable indices means Percepta needs an encoding trick for larger memory spaces (multi-head addressing, float64, or address partitioning).
+- **Float32 is the bottleneck — but solvable.** ~4K addressable indices per parabolic head (revised down from initial 7K measurement). Residual (bit-split) addressing with 2 heads extends this to 25M, likely what Percepta uses.
 - **Cumsum is not the weak link.** Both the mean×t trick and sequential lookback are stable far beyond expected.
 - **"Convex hull" is slightly misleading.** The speed comes from exploiting unimodal structure via binary/ternary search, not from hull size. For parabolic keys, all points lie on the hull.
 - **The primitives compose.** Phase 4 proves that parabolic indexing, recency bias, and sequential state tracking work together as a stack machine executor — same memory primitive addresses both program memory and stack memory without interference.

@@ -38,6 +38,16 @@
 
 ---
 
+## Phase 2b: Extended Addressing (added after Phase 4)
+
+**Goal:** The float32 limit (~4K addresses, revised from initial ~7K) constrains WASM-scale execution. Find encoding tricks to extend addressable range.
+
+**Result:** Residual (bit-split) addressing solves this. Split addr = (block, offset), each resolved by a separate head. B=5000 → 25M addressable range from 2 heads, zero errors.
+
+**Impact:** Phase 5 can use standard parabolic (toy programs stay well within 4K). Phase 6 should use residual addressing for realistic WASM memory.
+
+---
+
 ## Phase 3: Cumulative Sum Attention — Tracking Running State
 
 **Goal:** Verify the claim that attention can compute cumulative sums (used for instruction pointer, stack depth, etc.).
@@ -85,14 +95,20 @@
 
 **Tasks:**
 1. Generate a dataset of (program, execution_trace) pairs for the minimal stack machine.
-2. Train the d_model=36, n_heads=18, n_layers=7 architecture from the blog on next-token prediction over traces.
+2. Train a small transformer (start with d_model=32, n_heads=4, n_layers=2 — matching Phase 4's head assignment) on next-token prediction over traces.
 3. Evaluate: does it learn perfect execution? On how many instructions? Where does it break?
 4. Compare decoding speed: standard KV cache vs hull cache on the trained model.
 5. Inspect learned attention patterns — do the heads discover the parabolic encoding or something else?
 
+**Updated notes from Phase 4:**
+- The FF routing for opcode-dependent logic is the hardest part to learn — the attention patterns are clean.
+- Standard parabolic encoding suffices (programs stay within 4K stack depth).
+- Start small: d_model=32 should be enough given Phase 4's 4-head decomposition.
+- The scientifically interesting outcome: does it discover parabolic encoding, or something else that also works?
+
 **Key question answered:** Can a tiny transformer actually *learn* to be an executor from data, and does it converge to the theoretically optimal attention structure?
 
-**Estimated effort:** ~400 lines + training time. CPU-only training of a 36-dim model should be fast (minutes, not hours). This is the most interesting phase — it tests whether the theoretical construction is learnable or purely a proof of existence.
+**Estimated effort:** ~400 lines + training time. CPU-only training of a 32-dim model should be fast (minutes, not hours). This is the most interesting phase — it tests whether the theoretical construction is learnable or purely a proof of existence.
 
 ---
 
