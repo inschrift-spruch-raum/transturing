@@ -1,0 +1,29 @@
+{
+  "stage_1": {
+    "stage": 1,
+    "name": "PUSH + HALT",
+    "val_acc": 0.8505184003645893,
+    "epochs_trained": 72,
+    "perfect": 49,
+    "final_correct": 50,
+    "wall_time": 214.6500358581543
+  },
+  "stage_2": {
+    "stage": 2,
+    "name": "PUSH + POP + DUP + HALT",
+    "val_acc": 0.8551449687322342,
+    "epochs_trained": 118,
+    "perfect": 50,
+    "final_correct": 50,
+    "wall_time": 361.99548530578613
+  },
+  "stage_3": {
+    "stage": 3,
+    "name": "Full instruction set",
+    "val_acc": 0.8514926239981415,
+    "epochs_trained": 79,
+    "perfect": 39,
+    "final_correct": 44,
+    "wall_time": 246.3800287246704
+  }
+}

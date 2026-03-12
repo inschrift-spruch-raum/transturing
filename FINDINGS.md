@@ -313,10 +313,53 @@ The Phase 5 finding was "the model learns structure but not arithmetic." Phase 6
 
 However, 81% token accuracy and 23/50 perfect traces means the model still makes errors — particularly on longer programs and ADD operations where two stack values must be retrieved and summed. The remaining gap likely requires either more parameters or more training data.
 
-### Open questions
-- Why does Stage 1 plateau at 57%? Is the bottleneck value memorization, position encoding, or SP tracking?
-- Would more training data (>1000 samples) or more epochs help Stage 1 converge?
-- Would a wider model (d=128) with curriculum reach near-perfect execution?
+### Stage 1 Diagnostic: The Copy Bottleneck
+
+Error decomposition on the Stage 1 model revealed the model's failure is entirely about **value copying**, not structure:
+
+| Field | Teacher-forced accuracy | What it requires |
+|-------|------------------------|------------------|
+| OP (opcode) | 99.9% | Constant (always PUSH) — trivial |
+| SP (stack ptr) | 98.4% | Increment counter — trivial |
+| ARG (push value) | 21.2% | Copy value from program prefix — **hard** |
+| TOP (stack top) | 4.4% | Copy most recent push value — **hard** |
+
+The model collapses to predicting ~16 "favorite" values (32, 0, 3, 19...) instead of the 50 distinct values in the data. It predicts ARG == TOP only 20% of the time despite this being a hard invariant. **The FF layers learn position but not content-addressable lookup.**
+
+Three ablations identified the bottleneck as **convergence, not capacity**:
+
+| Experiment | Val Acc | ARG acc | TOP acc | Perfect | Change |
+|-----------|---------|---------|---------|---------|--------|
+| Baseline (1K data, 60 ep, d=64) | 57% | 21% | 4% | 0/50 | — |
+| A: 5K data, 200 epochs | **85%** | **100%** | **100%** | **50/50** | More data wins |
+| B: Small values (0-10) | 82% | 77% | 99% | 18/50 | Fewer values helps |
+| C: Wider model (d=128) | 84% | 95% | 98% | 34/50 | More capacity helps |
+
+**Experiment A is decisive:** the same 137K-param model achieves 100% ARG and TOP accuracy with sufficient data and training time. The copy mechanism IS learnable — the original Stage 1 was simply data-starved.
+
+### Phase 6b: Full Curriculum with 5K Samples
+
+Re-running all three stages with 5K training samples (5× original) and 200 max epochs:
+
+| Stage | Instructions | Val Acc | Perfect | Final OK |
+|-------|-------------|---------|---------|----------|
+| 1 | PUSH + HALT | 85% | 49/50 | 50/50 |
+| 2 | PUSH + POP + DUP + HALT | 86% | **50/50** | **50/50** |
+| 3 | Full set (+ ADD) | **85%** | **39/50** | **44/50** |
+
+**Progression across all runs:**
+
+| Run | Val Acc | Perfect | Final OK |
+|-----|---------|---------|----------|
+| Phase 5 baseline | 56% | 0/50 | 5/50 |
+| Phase 6a (1K data) | 81% | 23/50 | 35/50 |
+| Phase 6b (5K data) | **85%** | **39/50** | **44/50** |
+
+Stage 2 achieves **50/50 perfect traces** — the model perfectly executes all PUSH/POP/DUP programs. The remaining errors in Stage 3 are concentrated on ADD, where the model must retrieve two stack values and compute their sum.
+
+### Key Insight: Copy Before Compute
+
+The fundamental bottleneck in learning execution is not opcode dispatch or state tracking — it's **content-addressable memory lookup**. The model must learn to attend back to specific positions in the input and copy their values. This is exactly the parabolic indexing operation from Phases 1-2, but discovered via gradient descent rather than hand-wired. Once the copy mechanism converges (Experiment A), everything else follows.
 
 ---
 
@@ -330,7 +373,7 @@ However, 81% token accuracy and 23/50 perfect traces means the model still makes
 | 3 | Is cumsum via attention stable? | Yes | 100K+ steps in float32 |
 | 4 | Do the primitives compose? | Yes | FF routing is the bottleneck, not attention |
 | 5 | Can gradient descent learn execution? | Partially | Learns structure (56%), not perfect arithmetic |
-| 6 | Does curriculum learning help? | **Yes** | 56%→81% accuracy, 0→23 perfect traces |
+| 6 | Does curriculum learning help? | **Yes** | 56%→85% accuracy, 0→39 perfect traces |
 
 ## Key Insight Across All Phases
 
