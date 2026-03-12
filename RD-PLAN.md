@@ -112,31 +112,62 @@
 
 ---
 
-## Phase 6 (Stretch): WASM Fragment Execution
+## Phase 6: Curriculum Learning (Complete)
 
-**Goal:** If Phases 4-5 succeed, attempt a small subset of real WASM opcodes (i32.const, i32.add, i32.store, i32.load, br_if).
+**Goal:** Test whether staged instruction complexity improves learnability over Phase 5's flat training.
 
-**Tasks:**
-1. Compile a trivial C function (e.g., fibonacci) to WASM via Emscripten or hand-write WASM bytecode.
-2. Extend the tokenizer and trace format to cover the additional opcodes.
-3. Train or hand-wire the model to execute the WASM fragment.
+**Result:** YES. Curriculum learning improves accuracy from 56% → 85%, perfect traces from 0/50 → 39/50.
 
-**Key question answered:** Does the approach scale beyond toy instruction sets toward something resembling the blog's claims?
+**Key findings:**
+- **Copy bottleneck (solved):** Model couldn't copy values from program memory with 1K samples. 5K samples + 200 epochs → 100% copy accuracy. Convergence, not capacity.
+- **Non-arithmetic execution (solved):** Stage 2 (PUSH/POP/DUP) achieves 50/50 perfect traces.
+- **Two-operand retrieval (frontier):** ADD requires reading two different stack values simultaneously. Model gets 97% on DUP+ADD but 3% on PUSH a, PUSH b, ADD (a≠b). Doubling heads (h=4→8) at same d_model doesn't help.
+- **Architectural limit at ~85% val accuracy** for d=64, 2-layer, regardless of head count.
 
-**Estimated effort:** Significant. Only attempt if earlier phases go well.
+**Files:** phase6_curriculum.py, phase6_results.json, phase6b_results.json
+
+---
+
+## Phase 7 (Next): Two-Operand Retrieval
+
+**Goal:** Crack the ADD a+b problem — enable the model to read two different stack values and compute their sum.
+
+**Hypotheses to test (in priority order):**
+
+1. **More layers (L=4):** Layer 1 retrieves one operand into the residual stream, layer 2 retrieves the second and computes. The current L=2 architecture may not have enough sequential depth to do retrieve-then-retrieve-then-compute.
+
+2. **Larger d_model with proportional heads (d=128, h=8):** Keep d_head=16 while providing enough heads. The d=128/h=8 experiment was started but not completed — would give 476K params.
+
+3. **SP-relative positional encoding:** Add stack-pointer-relative position information to the embedding so attention can more easily address "the value 2 positions below SP" without learning it from scratch.
+
+4. **Intermediate trace tokens:** Add a "partial result" token in the ADD trace step — e.g., `[ADD, operand_a, operand_b, sum, sp, top]` instead of `[ADD, 0, sp, top]`. This gives the model a chance to retrieve each operand into a separate token before combining.
+
+**Key question answered:** Is the two-operand retrieval problem solvable with scale (more layers/width), or does it require architectural changes?
+
+---
+
+## Phase 8 (Stretch): WASM Fragment Execution
+
+**Goal:** If Phase 7 succeeds at perfecting the toy instruction set, attempt a small subset of real WASM opcodes (i32.const, i32.add, i32.store, i32.load, br_if).
+
+**Prerequisites:** Near-perfect execution of the current 5-opcode instruction set. Phase 2b's residual addressing for larger memory.
+
+**Key question answered:** Does the approach scale beyond toy instruction sets toward the blog's claims?
 
 ---
 
 ## Success Criteria
 
-| Phase | Success looks like |
-|-------|-------------------|
-| 1 | Clear log vs linear scaling plot with crossover point identified |
-| 2 | 100% retrieval accuracy up to some numerical limit, limit characterized |
-| 3 | Cumsum within ±1 of true value over 100K+ steps |
-| 4 | Hand-wired transformer correctly executes 10+ test programs |
-| 5 | Trained model achieves >99% token accuracy on held-out programs |
-| 6 | Fibonacci(10) executes correctly inside the transformer |
+| Phase | Success looks like | Status |
+|-------|-------------------|--------|
+| 1 | Clear log vs linear scaling plot with crossover point identified | Done |
+| 2 | 100% retrieval accuracy up to some numerical limit, limit characterized | Done |
+| 3 | Cumsum within ±1 of true value over 100K+ steps | Done |
+| 4 | Hand-wired transformer correctly executes 10+ test programs | Done |
+| 5 | Trained model achieves >99% token accuracy on held-out programs | Partial (85%) |
+| 6 | Curriculum learning improves over Phase 5 baseline | Done (56%→85%) |
+| 7 | Model correctly computes ADD a+b for arbitrary a≠b | Open |
+| 8 | Fibonacci(10) executes correctly inside the transformer | Stretch |
 
 ## Dependencies & Risks
 
@@ -147,6 +178,8 @@
 
 ## Recommended Execution Order
 
-Start with Phases 1-3 in parallel (they're independent). Phase 4 depends on all three. Phase 5 depends on Phase 4's tokenizer/trace design but not on the hand-wired weights. Phase 6 is optional.
+Phases 1-3 (done): Building blocks. Phase 4 (done): Composition. Phase 5 (done): Learnability baseline. Phase 6 (done): Curriculum learning + deep diagnostics.
 
-Phases 1-3 are the "can we reproduce the building blocks" check. Phase 4 is the "can we compose them" check. Phase 5 is the "is this learnable" check — and the most scientifically interesting.
+**Phase 7 is the critical next step.** The two-operand retrieval problem is cleanly isolated and testable. Hypothesis 1 (more layers) is the quickest to test — just change n_layers from 2 to 4 and re-run the Phase 6b curriculum. If that doesn't work, hypothesis 4 (intermediate trace tokens) is the most architecturally interesting — it changes what the model needs to learn rather than just scaling up.
+
+**The overarching research question has shifted:** We've proven that transformers CAN learn execution (Phases 4-6). The question is now: what's the minimum architecture that achieves PERFECT execution? The answer will tell us how Percepta's d=36/h=18/L=7 architecture is partitioned between lookup mechanics and routing capacity.

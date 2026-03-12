@@ -50,22 +50,30 @@ The workhorse primitive: `k = (2j, -j²)` encodes position j such that dot-produ
 | 3 | phase3_cumsum.py | Complete | Cumulative sum tracks instruction pointer / stack pointer |
 | 4 | phase4_stack_machine.py | Complete | Hand-wired transformer executes PUSH/POP/ADD/DUP/HALT correctly |
 | 5 | phase5_training.py | Complete | Tiny model learns execution grammar (56% acc) but not perfect traces |
-| 6 | phase6_curriculum.py | In progress | Curriculum learning: PUSH-only → PUSH+POP → full instruction set |
+| 6 | phase6_curriculum.py | Complete | Curriculum learning: 56%→85% acc, 0→39/50 perfect traces |
 
 ### Phase 5 Key Finding
 
 Wide model (d=64, heads=4, layers=2, 137K params) reaches 56% token accuracy (vs 0.5% chance) but 0/50 perfect traces. The model learns *structure* but not *precise routing*. This is the attention-vs-FF gap made concrete: good at finding operands, bad at dispatching operations.
 
-### Phase 6 Hypothesis
+### Phase 6 Key Findings
 
-Curriculum learning may close the gap: train on PUSH-only first (trivial routing), then incrementally add opcodes. Each stage has simpler FF routing to learn before complexity increases.
+Curriculum learning confirms the hypothesis: staged instruction complexity (PUSH-only → +POP/DUP → full set) improves accuracy from 56% to 85% with 39/50 perfect traces.
+
+**Three deep diagnostics revealed the bottleneck progression:**
+1. **Copy bottleneck (solved):** The model couldn't copy values from program memory. Fix: more data (5K samples) — the copy mechanism IS learnable, just data-starved at 1K.
+2. **Non-arithmetic execution (solved):** Stage 2 (PUSH/POP/DUP) achieves 50/50 perfect traces. The model fully learns stack operations that don't require arithmetic.
+3. **Two-operand retrieval (current frontier):** ADD requires reading stack[SP-1] and stack[SP-2] simultaneously. The model gets 97% on DUP+ADD (one lookup + double) but only 3% on PUSH a, PUSH b, ADD where a≠b. Doubling heads (h=4→8) doesn't help — per-head capacity drops, negating the extra heads.
+
+**Key insight:** Content-addressable memory lookup (parabolic indexing via gradient descent) is THE fundamental bottleneck in learning execution. Once single-value copy converges, everything follows except two-value retrieval + arithmetic.
 
 ## Development Notes
 
 ### Container Constraints
-- Claude.ai containers time out on long training runs (~15 min)
-- CCotw sessions are better suited for compute-heavy phases
+- Claude.ai containers: ~200s bash timeout, ~15 min session limit, 8GB RAM
+- CCotw (Claude Code on the web): 600s bash timeout, longer sessions, 16GB RAM — better for compute
 - Store checkpoint memories every ~5 min during training to survive cutoffs
+- Install torch/numpy at session start (`pip install torch numpy`); not pre-installed in CCotw
 
 ### Testing
 Always run phase scripts and verify output before committing. Each phase file is self-contained with its own test harness.
