@@ -51,6 +51,9 @@ The workhorse primitive: `k = (2j, -j²)` encodes position j such that dot-produ
 | 4 | phase4_stack_machine.py | Complete | Hand-wired transformer executes PUSH/POP/ADD/DUP/HALT correctly |
 | 5 | phase5_training.py | Complete | Tiny model learns execution grammar (56% acc) but not perfect traces |
 | 6 | phase6_curriculum.py | Complete | Curriculum learning: 56%→85% acc, 0→39/50 perfect traces |
+| 7 | phase7_percepta_arch.py | Complete | Percepta architecture (d=36,h=18,L=7): 84.6% acc, DIFF+ADD still 0% |
+| 8 | phase8_microop_traces.py | Complete | Micro-op decomposition proves retrieval is solved; arithmetic is bottleneck |
+| 9 | phase9_weighted_arithmetic.py | Complete | Weighted loss perfects doubling (100%) but DIFF+ADD stays 0% |
 
 ### Phase 5 Key Finding
 
@@ -66,6 +69,43 @@ Curriculum learning confirms the hypothesis: staged instruction complexity (PUSH
 3. **Two-operand retrieval (current frontier):** ADD requires reading stack[SP-1] and stack[SP-2] simultaneously. The model gets 97% on DUP+ADD (one lookup + double) but only 3% on PUSH a, PUSH b, ADD where a≠b. Doubling heads (h=4→8) doesn't help — per-head capacity drops, negating the extra heads.
 
 **Key insight:** Content-addressable memory lookup (parabolic indexing via gradient descent) is THE fundamental bottleneck in learning execution. Once single-value copy converges, everything follows except two-value retrieval + arithmetic.
+
+### Phase 7 Key Finding
+
+Percepta's architecture (d_model=36, n_heads=18, n_layers=7, head_dim=2) performs comparably to Phase 6's wider model (84.6% vs 85%) but does NOT break the DIFF+ADD wall (0% vs 3%). More depth and heads don't help — the bottleneck is elsewhere.
+
+### Phase 8 Key Findings — THE RETRIEVAL/ARITHMETIC SEPARATION
+
+**Phase 8 is the most important diagnostic phase.** It definitively separates retrieval from arithmetic as bottlenecks.
+
+Micro-op trace format expands each step from 4 to 6 tokens: `[OP, ARG, FETCH1, FETCH2, SP, TOP]`. For ADD, FETCH1 and FETCH2 explicitly contain the two operands before TOP must be predicted.
+
+**Results:**
+1. **Retrieval is SOLVED.** Token-by-token analysis shows FETCH1 and FETCH2 are correct 100% of the time for DIFF+ADD. The model perfectly retrieves both operands from different stack positions.
+2. **Arithmetic is the sole bottleneck.** The ONLY errors are on `TOP = FETCH1 + FETCH2`. Even with both operands already in context, the model predicts doubling (2*a) or copying instead of a+b.
+3. **The model CAN learn addition in isolation** — 98% accuracy on bare `a+b` task with 500 epochs. But within execution traces, addition receives too little gradient signal (~15% of tokens involve ADD).
+4. **Wider FF doesn't help.** Even d_ff=1024 (4x baseline) produces 0% DIFF+ADD. The bottleneck isn't capacity — it's the proportion of arithmetic gradient updates.
+5. **ADD-enriched data marginally helps** — 50% DIFF+ADD training data yields 1/30 (3%), barely breaking the wall.
+
+**Revised architectural insight:** "Attention is lookup; feed-forward is arithmetic." Attention reliably learns content-addressable retrieval via gradient descent. But FF layers struggle to learn even simple arithmetic (integer addition) when it's a minority of the training signal. This suggests real transformer execution requires either (a) arithmetic pre-training, (b) massive over-sampling of arithmetic examples, or (c) external arithmetic modules.
+
+### Phase 9 Key Findings — WEIGHTED LOSS
+
+Upweighting arithmetic tokens in the loss (10x-50x on ADD's TOP position) tests whether gradient signal alone explains the DIFF+ADD wall.
+
+**Results:**
+- **DUP+ADD: 83% → 100%.** Weighted loss perfects doubling (f(a)=2a). This was learnable but under-trained.
+- **SAME+ADD: 83% → 100%.** Same story — doubling perfected.
+- **DIFF+ADD: 0% → 0%.** True addition (f(a,b)=a+b for a≠b) not learned at ANY weight (10x, 20x, 50x).
+- Higher weights (50x) actually hurt overall accuracy (87.4% vs 88.3% at 10x) by destabilizing non-ADD tokens.
+
+**Conclusion:** The DIFF+ADD wall is NOT a gradient signal problem. It's a representational problem: the FF layers cannot learn integer addition in token embedding space while simultaneously handling execution logic. The model can learn addition in isolation (98% in Phase 8's bare test) but not within the multi-task execution context.
+
+**The bottleneck progression is now fully characterized:**
+1. Copy mechanism — solved by more data (Phase 6)
+2. Stack retrieval — solved by micro-op decomposition (Phase 8)
+3. Doubling (2a) — solved by weighted loss (Phase 9)
+4. True addition (a+b, a≠b) — **unsolved**: requires either joint arithmetic training, digit-level decomposition, or dedicated arithmetic modules
 
 ## Development Notes
 
