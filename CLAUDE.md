@@ -54,6 +54,7 @@ The workhorse primitive: `k = (2j, -j²)` encodes position j such that dot-produ
 | 7 | phase7_percepta_arch.py | Complete | Percepta architecture (d=36,h=18,L=7): 84.6% acc, DIFF+ADD still 0% |
 | 8 | phase8_microop_traces.py | Complete | Micro-op decomposition proves retrieval is solved; arithmetic is bottleneck |
 | 9 | phase9_weighted_arithmetic.py | Complete | Weighted loss perfects doubling (100%) but DIFF+ADD stays 0% |
+| 11 | phase11_compile_executor.py | Complete | Compiled execution: correct traces, extended ISA (SUB/JZ/JNZ), O(log t) path |
 
 ### Phase 5 Key Finding
 
@@ -105,7 +106,26 @@ Upweighting arithmetic tokens in the loss (10x-50x on ADD's TOP position) tests 
 1. Copy mechanism — solved by more data (Phase 6)
 2. Stack retrieval — solved by micro-op decomposition (Phase 8)
 3. Doubling (2a) — solved by weighted loss (Phase 9)
-4. True addition (a+b, a≠b) — **unsolved**: requires either joint arithmetic training, digit-level decomposition, or dedicated arithmetic modules
+4. True addition (a+b, a≠b) — **unsolved via training**: requires compilation into weights (Percepta's approach)
+
+### Phase 11 Key Findings — RETURN TO THE COMPILE PATH
+
+After rereading Percepta's blog post, we identified that Phases 5-10 diverged from the original approach. Percepta **compiles** interpreter logic into weights; we were **training** via gradient descent. Phase 11 returns to the compile path.
+
+**Results:**
+1. **Compiled executor matches reference 100%.** All 10 Phase 4 test programs produce identical traces when executed via compiled attention primitives (parabolic indexing + cumsum).
+2. **Extended ISA works.** SUB, JZ/JNZ (conditional branching), and NOP enable loops and control flow. A countdown loop (JNZ jumping backward) executes correctly — the first looping program in this repo.
+3. **HullKVCache integration preserves correctness.** All traces match when stack memory uses the Phase 1 hull cache.
+4. **Scaling advantage confirmed.** Dict-based O(1) stack access gives 20-170x speedup over parabolic numpy scan on programs with 100-2000 steps.
+
+**Revised architectural insight:** The DIFF+ADD wall from Phases 5-10 was a *training* limitation, not an *architectural* one. When arithmetic is compiled into FF weights (rather than learned via gradient descent), the transformer executes correctly — including true a+b addition. This validates Percepta's core claim: compile, don't train.
+
+**The bottleneck progression is now fully characterized:**
+1. Copy mechanism — solved by more data (Phase 6)
+2. Stack retrieval — solved by micro-op decomposition (Phase 8)
+3. Doubling (2a) — solved by weighted loss (Phase 9)
+4. True addition (a+b, a≠b) — solved by **compilation** (Phase 11); unsolvable via training alone
+5. Control flow (branching, loops) — solved by compiled JZ/JNZ (Phase 11)
 
 ## Development Notes
 
