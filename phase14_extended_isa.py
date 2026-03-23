@@ -1,5 +1,5 @@
 """
-Phase 14: Extended ISA — Chunks 1+2: Arithmetic & Comparison Operations
+Phase 14: Extended ISA — Chunks 1-3: Arithmetic, Comparison & Bitwise Operations
 
 Chunk 1 (Issue #11): 5 arithmetic opcodes:
   MUL   (13)  — a b → (a*b)
@@ -21,27 +21,40 @@ Chunk 2 (Issue #12): 11 comparison opcodes (all push 1=true or 0=false):
   GE_S  (27)  — a b → (b≥a ? 1 : 0)       sd=-1, signed
   GE_U  (28)  — a b → (b≥a ? 1 : 0)       sd=-1, unsigned (=GE_S for now)
 
+Chunk 3 (Issue #13): 8 bitwise opcodes (all binary, sd=-1):
+  AND   (29)  — a b → (a & b)
+  OR    (30)  — a b → (a | b)
+  XOR   (31)  — a b → (a ^ b)
+  SHL   (32)  — a b → (b << a)            shift count from top, masked to 0-31
+  SHR_S (33)  — a b → (b >> a) signed     arithmetic right shift
+  SHR_U (34)  — a b → (b >> a) unsigned   logical right shift
+  ROTL  (35)  — a b → rotl(b, a)          32-bit left rotate
+  ROTR  (36)  — a b → rotr(b, a)          32-bit right rotate
+
 Division by zero triggers OP_TRAP (99): executor appends a TraceStep with
 op=OP_TRAP and breaks. The runner prints "TRAP: division by zero" instead
 of a result.
 
-Architecture note: MUL/DIV/REM and all comparison ops are NONLINEAR.
+Architecture note: MUL/DIV/REM, comparisons, and bitwise ops are NONLINEAR.
 ADD/SUB can be expressed as linear combinations via M_top. MUL (val_a *
-val_b) and comparisons (conditional 0/1) cannot. The FF dispatch has:
+val_b), comparisons (conditional 0/1), and bitwise ops (integer logic)
+cannot. The FF dispatch has:
   - M_top: linear routing matrix (handles PUSH through ROT)
-  - Nonlinear override: explicit computation for arithmetic + comparisons
+  - Nonlinear override: explicit computation for arith + cmp + bitwise
 This is actually more faithful to real transformer FF layers (which have
 nonlinear activations) than the pure-linear M_top was.
 
-D_MODEL=36 constraint: comparison ops share embedding dims for S/U pairs
-(DIM_IS_LT covers both LT_S and LT_U, etc.) since _U variants currently
-behave identically to _S.
+D_MODEL=36 constraint: comparison ops share embedding dims for S/U pairs.
+Bitwise ops (Chunk 3) use OPCODE_IDX for dispatch but do not have
+dedicated one-hot embedding dims (D_MODEL=36 is fully allocated).
+The compiled model routes via opcode_one_hot from OPCODE_IDX, not
+embedding dims, so this works without D_MODEL expansion.
 
 No new attention heads needed — all ops use the existing stack read/write
 mechanism.
 
 Part of Issue #8 (Tier 1 ISA expansion).
-  Chunk 1: Issue #11 (closed). Chunk 2: Issue #12.
+  Chunk 1: Issue #11 (closed). Chunk 2: Issue #12. Chunk 3: Issue #13.
 """
 
 import numpy as np
@@ -105,6 +118,14 @@ OP_LE_S  = 25
 OP_LE_U  = 26
 OP_GE_S  = 27
 OP_GE_U  = 28
+OP_AND   = 29
+OP_OR    = 30
+OP_XOR   = 31
+OP_SHL   = 32
+OP_SHR_S = 33
+OP_SHR_U = 34
+OP_ROTL  = 35
+OP_ROTR  = 36
 OP_TRAP  = 99  # Division by zero exit condition
 
 OP_NAMES_P14 = {
@@ -125,6 +146,14 @@ OP_NAMES_P14 = {
     OP_LE_U:  "LE_U",
     OP_GE_S:  "GE_S",
     OP_GE_U:  "GE_U",
+    OP_AND:   "AND",
+    OP_OR:    "OR",
+    OP_XOR:   "XOR",
+    OP_SHL:   "SHL",
+    OP_SHR_S: "SHR_S",
+    OP_SHR_U: "SHR_U",
+    OP_ROTL:  "ROTL",
+    OP_ROTR:  "ROTR",
     OP_TRAP:  "TRAP",
 }
 
@@ -183,15 +212,26 @@ OPCODE_IDX = {
     OP_LE_U:  25,
     OP_GE_S:  26,
     OP_GE_U:  27,
+    OP_AND:   28,
+    OP_OR:    29,
+    OP_XOR:   30,
+    OP_SHL:   31,
+    OP_SHR_S: 32,
+    OP_SHR_U: 33,
+    OP_ROTL:  34,
+    OP_ROTR:  35,
 }
 
-N_OPCODES = 28  # 12 from Phase 13 + 5 arithmetic + 11 comparison
+N_OPCODES = 36  # 12 from Phase 13 + 5 arithmetic + 11 comparison + 8 bitwise
 
 # Which opcodes are nonlinear (can't be expressed via M_top linear routing)
 NONLINEAR_OPS = {OP_MUL, OP_DIV_S, OP_DIV_U, OP_REM_S, OP_REM_U,
                  OP_EQZ, OP_EQ, OP_NE,
                  OP_LT_S, OP_LT_U, OP_GT_S, OP_GT_U,
-                 OP_LE_S, OP_LE_U, OP_GE_S, OP_GE_U}
+                 OP_LE_S, OP_LE_U, OP_GE_S, OP_GE_U,
+                 OP_AND, OP_OR, OP_XOR,
+                 OP_SHL, OP_SHR_S, OP_SHR_U,
+                 OP_ROTL, OP_ROTR}
 
 
 # ─── Signed division/remainder (truncate toward zero) ─────────────
@@ -208,6 +248,46 @@ def _trunc_rem(b, a):
     Sign of result matches dividend b (WASM i32.rem_s semantics).
     """
     return b - _trunc_div(b, a) * a
+
+
+# ─── Bitwise helpers (32-bit word semantics) ─────────────────────
+
+MASK32 = 0xFFFFFFFF
+
+def _to_i32(val):
+    """Cast to 32-bit signed integer from potentially float stack value."""
+    return int(val) & MASK32
+
+def _shr_u(b, a):
+    """Logical (unsigned) right shift of b by a positions.
+    b is treated as unsigned 32-bit; result is unsigned.
+    """
+    return (_to_i32(b) >> (int(a) & 31))
+
+def _shr_s(b, a):
+    """Arithmetic (signed) right shift of b by a positions.
+    b is treated as signed 32-bit; sign bit is preserved.
+    """
+    val = _to_i32(b)
+    # Convert to signed 32-bit
+    if val >= 0x80000000:
+        val -= 0x100000000
+    shift = int(a) & 31
+    result = val >> shift
+    # Back to unsigned representation for storage
+    return result & MASK32 if result < 0 else result
+
+def _rotl32(b, a):
+    """Left-rotate b by a positions within 32-bit word."""
+    val = _to_i32(b)
+    shift = int(a) & 31
+    return ((val << shift) | (val >> (32 - shift))) & MASK32 if shift else val
+
+def _rotr32(b, a):
+    """Right-rotate b by a positions within 32-bit word."""
+    val = _to_i32(b)
+    shift = int(a) & 31
+    return ((val >> shift) | (val << (32 - shift))) & MASK32 if shift else val
 
 
 # ─── Extended Embedding ───────────────────────────────────────────
@@ -380,6 +460,64 @@ class Phase14Executor(Phase13Executor):
                 stack_write(sp, result)
                 top = result
 
+            # ── Phase 14 Chunk 3: bitwise ops ──
+            elif op == OP_AND:
+                val_a = stack_read(sp)
+                val_b = stack_read(sp - 1)
+                result = _to_i32(val_a) & _to_i32(val_b)
+                sp -= 1
+                stack_write(sp, result)
+                top = result
+            elif op == OP_OR:
+                val_a = stack_read(sp)
+                val_b = stack_read(sp - 1)
+                result = _to_i32(val_a) | _to_i32(val_b)
+                sp -= 1
+                stack_write(sp, result)
+                top = result
+            elif op == OP_XOR:
+                val_a = stack_read(sp)
+                val_b = stack_read(sp - 1)
+                result = _to_i32(val_a) ^ _to_i32(val_b)
+                sp -= 1
+                stack_write(sp, result)
+                top = result
+            elif op == OP_SHL:
+                val_a = stack_read(sp)
+                val_b = stack_read(sp - 1)
+                result = (_to_i32(val_b) << (int(val_a) & 31)) & MASK32
+                sp -= 1
+                stack_write(sp, result)
+                top = result
+            elif op == OP_SHR_S:
+                val_a = stack_read(sp)
+                val_b = stack_read(sp - 1)
+                result = _shr_s(val_b, val_a)
+                sp -= 1
+                stack_write(sp, result)
+                top = result
+            elif op == OP_SHR_U:
+                val_a = stack_read(sp)
+                val_b = stack_read(sp - 1)
+                result = _shr_u(val_b, val_a)
+                sp -= 1
+                stack_write(sp, result)
+                top = result
+            elif op == OP_ROTL:
+                val_a = stack_read(sp)
+                val_b = stack_read(sp - 1)
+                result = _rotl32(val_b, val_a)
+                sp -= 1
+                stack_write(sp, result)
+                top = result
+            elif op == OP_ROTR:
+                val_a = stack_read(sp)
+                val_b = stack_read(sp - 1)
+                result = _rotr32(val_b, val_a)
+                sp -= 1
+                stack_write(sp, result)
+                top = result
+
             # ── Control flow ──
             elif op == OP_JZ:
                 cond = stack_read(sp)
@@ -412,15 +550,17 @@ class Phase14Executor(Phase13Executor):
 # ─── PyTorch Model ────────────────────────────────────────────────
 
 class Phase14Model(Phase13Model):
-    """Compiled transformer with Phase 14 arithmetic + comparison ops.
+    """Compiled transformer with Phase 14 arithmetic + comparison + bitwise ops.
 
     Extends Phase 13's FF dispatch with nonlinear computation for
-    MUL, DIV_S, DIV_U, REM_S, REM_U (arithmetic) and
-    EQZ, EQ, NE, LT/GT/LE/GE_S/U (comparisons).
+    MUL, DIV_S, DIV_U, REM_S, REM_U (arithmetic),
+    EQZ, EQ, NE, LT/GT/LE/GE_S/U (comparisons), and
+    AND, OR, XOR, SHL, SHR_S, SHR_U, ROTL, ROTR (bitwise).
 
     These can't be expressed as linear routing via M_top:
       MUL = val_a * val_b (product, not linear combination)
       EQ = 1 if val_a == val_b else 0 (conditional, not linear)
+      AND = int(val_a) & int(val_b) (integer logic, not linear)
 
     Architecture: M_top handles linear ops (PUSH through ROT).
     Nonlinear ops have M_top rows set to zero; their results come
@@ -440,7 +580,7 @@ class Phase14Model(Phase13Model):
         self.head_stack_b  = CompiledAttentionHead(d_model, head_dim=2, v_dim=1, use_bias_q=True)
         self.head_stack_c  = CompiledAttentionHead(d_model, head_dim=2, v_dim=1, use_bias_q=True)
 
-        # FF dispatch: 28 opcodes, 4 value inputs
+        # FF dispatch: 36 opcodes, 4 value inputs
         self.register_buffer('M_top', torch.zeros(N_OPCODES, 4, dtype=DTYPE))
         self.register_buffer('sp_deltas', torch.zeros(N_OPCODES, dtype=DTYPE))
 
@@ -549,15 +689,17 @@ class Phase14Model(Phase13Model):
             self.M_top[11] = torch.tensor([ 0.,  0.,  0.,  1.])  # ROT:  top = vc
 
             # Nonlinear ops: M_top rows stay zero — results computed in forward()
-            # self.M_top[12..27] = 0  (MUL, DIV_S, DIV_U, REM_S, REM_U, EQZ..GE_U)
+            # self.M_top[12..35] = 0  (MUL..GE_U, AND..ROTR)
 
             # SP deltas:
             # Idx: PUSH POP  ADD  DUP HALT SUB  JZ  JNZ NOP SWAP OVER ROT
             #      MUL DIVS DIVU REMS REMU EQZ  EQ   NE LTS LTU GTS GTU LES LEU GES GEU
+            #      AND  OR  XOR  SHL SHRS SHRU ROTL ROTR
             self.sp_deltas.copy_(torch.tensor(
                 [1., -1., -1., 1., 0., -1., -1., -1., 0., 0., 1., 0.,
                  -1., -1., -1., -1., -1.,
-                 0.,  -1., -1., -1., -1., -1., -1., -1., -1., -1., -1.]))
+                 0.,  -1., -1., -1., -1., -1., -1., -1., -1., -1., -1.,
+                 -1., -1., -1., -1., -1., -1., -1., -1.]))
 
     def forward(self, query_emb, prog_embs, stack_embs):
         """Execute one step.
@@ -613,7 +755,7 @@ class Phase14Model(Phase13Model):
         candidates = self.M_top @ values  # (N_OPCODES,)
         top_linear = (opcode_one_hot * candidates).sum()
 
-        # FF Dispatch — nonlinear path (Phase 14 arithmetic + comparisons)
+        # FF Dispatch — nonlinear path (Phase 14 arithmetic + comparisons + bitwise)
         va = round(val_a.item())
         vb = round(val_b.item())
 
@@ -638,6 +780,16 @@ class Phase14Model(Phase13Model):
         nonlinear[OPCODE_IDX[OP_LE_U]] = 1.0 if vb <= va else 0.0
         nonlinear[OPCODE_IDX[OP_GE_S]] = 1.0 if vb >= va else 0.0
         nonlinear[OPCODE_IDX[OP_GE_U]] = 1.0 if vb >= va else 0.0
+
+        # Bitwise ops: integer logic on 32-bit values
+        nonlinear[OPCODE_IDX[OP_AND]]   = float(_to_i32(va) & _to_i32(vb))
+        nonlinear[OPCODE_IDX[OP_OR]]    = float(_to_i32(va) | _to_i32(vb))
+        nonlinear[OPCODE_IDX[OP_XOR]]   = float(_to_i32(va) ^ _to_i32(vb))
+        nonlinear[OPCODE_IDX[OP_SHL]]   = float((_to_i32(vb) << (int(va) & 31)) & MASK32)
+        nonlinear[OPCODE_IDX[OP_SHR_S]] = float(_shr_s(vb, va))
+        nonlinear[OPCODE_IDX[OP_SHR_U]] = float(_shr_u(vb, va))
+        nonlinear[OPCODE_IDX[OP_ROTL]]  = float(_rotl32(vb, va))
+        nonlinear[OPCODE_IDX[OP_ROTR]]  = float(_rotr32(vb, va))
 
         top_nonlinear = (opcode_one_hot * nonlinear).sum()
         top = top_linear + top_nonlinear
@@ -708,7 +860,10 @@ class Phase14PyTorchExecutor:
                                 OP_REM_S, OP_REM_U,
                                 OP_EQ, OP_NE,
                                 OP_LT_S, OP_LT_U, OP_GT_S, OP_GT_U,
-                                OP_LE_S, OP_LE_U, OP_GE_S, OP_GE_U):
+                                OP_LE_S, OP_LE_U, OP_GE_S, OP_GE_U,
+                                OP_AND, OP_OR, OP_XOR,
+                                OP_SHL, OP_SHR_S, OP_SHR_U,
+                                OP_ROTL, OP_ROTR):
                     # All binary ops: pop two, push one at new_sp
                     stack_embs_list.append(
                         embed_stack_entry(new_sp, top, write_count))
@@ -1038,6 +1193,181 @@ def make_native_clamp(val, lo, hi):
         Instruction(OP_HALT),         # 14
         # val in range: keep it
         Instruction(OP_HALT),         # 15
+    ]
+    return prog, expected
+
+
+# ─── Bitwise Program Generators ──────────────────────────────────
+
+def make_bitwise_binary(op, a, b):
+    """Generic bitwise binary: PUSH a, PUSH b, OP, HALT.
+
+    Stack after pushes: sp points to b (top), sp-1 to a.
+    val_a = stack[sp] = b, val_b = stack[sp-1] = a.
+
+    For AND/OR/XOR: result = val_a OP val_b (commutative, order doesn't matter).
+    For SHL:   result = val_b << val_a = a << b  (shift count from top = b)
+    For SHR_S: result = val_b >> val_a = a >> b  (arithmetic)
+    For SHR_U: result = val_b >> val_a = a >> b  (logical)
+    For ROTL:  result = rotl(val_b, val_a) = rotl(a, b)
+    For ROTR:  result = rotr(val_b, val_a) = rotr(a, b)
+
+    Returns (program, expected_result).
+    """
+    # val_a = b (top of stack), val_b = a (second on stack)
+    va, vb = b, a
+    BITWISE_SEMANTICS = {
+        OP_AND:   lambda va, vb: _to_i32(va) & _to_i32(vb),
+        OP_OR:    lambda va, vb: _to_i32(va) | _to_i32(vb),
+        OP_XOR:   lambda va, vb: _to_i32(va) ^ _to_i32(vb),
+        OP_SHL:   lambda va, vb: (_to_i32(vb) << (int(va) & 31)) & MASK32,
+        OP_SHR_S: lambda va, vb: _shr_s(vb, va),
+        OP_SHR_U: lambda va, vb: _shr_u(vb, va),
+        OP_ROTL:  lambda va, vb: _rotl32(vb, va),
+        OP_ROTR:  lambda va, vb: _rotr32(vb, va),
+    }
+    expected = BITWISE_SEMANTICS[op](va, vb)
+    return [
+        Instruction(OP_PUSH, a),
+        Instruction(OP_PUSH, b),
+        Instruction(op),
+        Instruction(OP_HALT),
+    ], expected
+
+
+def make_popcount_loop(n):
+    """Count set bits of n using AND + SHR_U loop. O(bits) steps.
+
+    Algorithm: count = 0; while n != 0: count += (n & 1); n >>= 1.
+    Uses native bitwise ops — no POPCNT instruction yet (that's Tier 1 unary, Chunk 4).
+
+    Returns (program, expected_result).
+    """
+    expected = bin(n & MASK32).count('1')
+    prog = [
+        Instruction(OP_PUSH, n),      # 0: n
+        Instruction(OP_PUSH, 0),      # 1: count = 0
+        # ── Loop (addr 2) ──
+        Instruction(OP_SWAP),         # 2: [count, n] → [n, count]... wait
+        # Rethink: keep [n, count] on stack.
+        # Start: [n, count]. We need to test if n == 0.
+    ]
+    # Simpler layout: [n, count] with n below count
+    prog = [
+        Instruction(OP_PUSH, 0),      # 0: count = 0
+        Instruction(OP_PUSH, n),      # 1: n  → stack: [count, n]
+        # ── Loop (addr 2) ──
+        Instruction(OP_DUP),          # 2: [count, n, n]
+        Instruction(OP_JZ, 13),       # 3: if n == 0 → done
+        # Extract LSB: n & 1
+        Instruction(OP_DUP),          # 4: [count, n, n]
+        Instruction(OP_PUSH, 1),      # 5: [count, n, n, 1]
+        Instruction(OP_AND),          # 6: [count, n, n&1]
+        # Add LSB to count
+        Instruction(OP_ROT),          # 7: [n, n&1, count]
+        Instruction(OP_ADD),          # 8: [n, count+lsb]
+        Instruction(OP_SWAP),         # 9: [count', n]
+        # Shift n right by 1
+        Instruction(OP_PUSH, 1),      # 10: [count', n, 1]
+        Instruction(OP_SHR_U),        # 11: [count', n>>1]
+        Instruction(OP_PUSH, 1),      # 12
+        Instruction(OP_JNZ, 2),       # 13: always loop
+        # ── Done (addr 14) ──  Wait, JZ at addr 3 jumps to 13, but 13 is JNZ...
+    ]
+    # Let me fix the addresses. JZ at addr 3 should jump past the loop.
+    prog = [
+        Instruction(OP_PUSH, 0),      # 0: count = 0
+        Instruction(OP_PUSH, n),      # 1: n  → stack: [count, n]
+        # ── Loop (addr 2) ──
+        Instruction(OP_DUP),          # 2: [count, n, n]
+        Instruction(OP_JZ, 14),       # 3: if n == 0 → done (jump to addr 14)
+        # Extract LSB: n & 1
+        Instruction(OP_DUP),          # 4: [count, n, n]
+        Instruction(OP_PUSH, 1),      # 5: [count, n, n, 1]
+        Instruction(OP_AND),          # 6: [count, n, n&1]
+        # Add LSB to count
+        Instruction(OP_ROT),          # 7: [n, n&1, count]
+        Instruction(OP_ADD),          # 8: [n, count+lsb]
+        Instruction(OP_SWAP),         # 9: [count', n]
+        # Shift n right by 1
+        Instruction(OP_PUSH, 1),      # 10: [count', n, 1]
+        Instruction(OP_SHR_U),        # 11: [count', n>>1]
+        # Loop back
+        Instruction(OP_PUSH, 1),      # 12
+        Instruction(OP_JNZ, 2),       # 13: always jump (1 != 0)
+        # ── Done (addr 14) ──
+        # Stack: [count, 0] after JZ popped the 0 copy
+        Instruction(OP_POP),          # 14: drop the 0 (from JZ's pop? no...)
+    ]
+    # Actually: JZ pops the condition. After JZ at addr 3 jumps to 14:
+    # Stack before JZ: [count, n, n]. JZ pops n (the dup'd copy). Jump taken.
+    # Stack at 14: [count, n=0].
+    # Need to drop the 0 and keep count.
+    prog = [
+        Instruction(OP_PUSH, 0),      # 0: count = 0
+        Instruction(OP_PUSH, n),      # 1: n  → stack: [count, n]
+        # ── Loop (addr 2) ──
+        Instruction(OP_DUP),          # 2: [count, n, n]
+        Instruction(OP_JZ, 14),       # 3: if n == 0 → done. Pops dup'd n.
+        # Stack here: [count, n] (n != 0)
+        Instruction(OP_DUP),          # 4: [count, n, n]
+        Instruction(OP_PUSH, 1),      # 5: [count, n, n, 1]
+        Instruction(OP_AND),          # 6: [count, n, n&1]
+        Instruction(OP_ROT),          # 7: [n, n&1, count]
+        Instruction(OP_ADD),          # 8: [n, count']
+        Instruction(OP_SWAP),         # 9: [count', n]
+        Instruction(OP_PUSH, 1),      # 10: [count', n, 1]
+        Instruction(OP_SHR_U),        # 11: [count', n>>1]
+        Instruction(OP_PUSH, 1),      # 12
+        Instruction(OP_JNZ, 2),       # 13: always loop
+        # ── Done (addr 14) ──
+        # Stack: [count, 0]. JZ popped the dup'd copy; n=0 is still on stack.
+        Instruction(OP_SWAP),         # 14: [0, count]
+        Instruction(OP_POP),          # 15: drop 0  → wait, POP drops top and top becomes sp-1
+    ]
+    # POP decrements sp. After SWAP: [0, count]. sp points to count.
+    # POP: sp-=1, top = stack[sp] = stack[sp_old - 1] = 0. That's wrong.
+    # Let me just use SWAP + POP differently:
+    # After JZ lands at 14: stack = [count, 0]. sp points to 0.
+    # POP: sp -= 1, top = stack[sp] = count. That works!
+    prog = [
+        Instruction(OP_PUSH, 0),      # 0: count = 0
+        Instruction(OP_PUSH, n),      # 1: n  → stack: [count, n]
+        # ── Loop (addr 2) ──
+        Instruction(OP_DUP),          # 2: [count, n, n]
+        Instruction(OP_JZ, 14),       # 3: if n == 0 → done
+        Instruction(OP_DUP),          # 4: [count, n, n]
+        Instruction(OP_PUSH, 1),      # 5: [count, n, n, 1]
+        Instruction(OP_AND),          # 6: [count, n, n&1]
+        Instruction(OP_ROT),          # 7: [n, n&1, count]
+        Instruction(OP_ADD),          # 8: [n, count']
+        Instruction(OP_SWAP),         # 9: [count', n]
+        Instruction(OP_PUSH, 1),      # 10: [count', n, 1]
+        Instruction(OP_SHR_U),        # 11: [count', n>>1]
+        Instruction(OP_PUSH, 1),      # 12
+        Instruction(OP_JNZ, 2),       # 13: always jump
+        # ── Done (addr 14) ──
+        Instruction(OP_POP),          # 14: drop n=0, top = count
+        Instruction(OP_HALT),         # 15
+    ]
+    return prog, expected
+
+
+def make_bit_extract(n, bit_pos):
+    """Extract bit at position bit_pos from n. Result: 0 or 1.
+
+    Algorithm: (n >> bit_pos) & 1
+
+    Returns (program, expected_result).
+    """
+    expected = (_to_i32(n) >> (bit_pos & 31)) & 1
+    prog = [
+        Instruction(OP_PUSH, n),         # 0: n
+        Instruction(OP_PUSH, bit_pos),   # 1: bit_pos
+        Instruction(OP_SHR_U),           # 2: n >> bit_pos
+        Instruction(OP_PUSH, 1),         # 3: 1
+        Instruction(OP_AND),             # 4: (n >> bit_pos) & 1
+        Instruction(OP_HALT),            # 5
     ]
     return prog, expected
 
@@ -1401,7 +1731,7 @@ def test_model_summary():
     print(f"  M_top shape:      {tuple(model.M_top.shape)}")
     print(f"  sp_deltas shape:  {tuple(model.sp_deltas.shape)}")
     print(f"  linear ops:       12 (PUSH through ROT)")
-    print(f"  nonlinear ops:    16 (5 arithmetic + 11 comparison)")
+    print(f"  nonlinear ops:    24 (5 arithmetic + 11 comparison + 8 bitwise)")
     print(f"  trainable params: {total_params}")
     print(f"  buffer params:    {total_buffers}")
     print(f"  total compiled:   {total_params + total_buffers}")
@@ -1591,14 +1921,255 @@ def test_comparison_algorithms():
     return passed == total
 
 
+def test_bitwise_unit():
+    """Unit tests for all 8 bitwise opcodes."""
+    print("\n" + "=" * 60)
+    print("Test 11: Bitwise Unit Tests")
+    print("=" * 60)
+
+    np_exec = Phase14Executor()
+    pt_exec = Phase14PyTorchExecutor()
+
+    passed = 0
+    total = 0
+
+    # AND tests
+    and_cases = [
+        (0xFF, 0x0F, 0x0F),
+        (0xFF, 0xFF, 0xFF),
+        (0xFF, 0x00, 0x00),
+        (0xAA, 0x55, 0x00),
+        (12, 10, 8),       # 1100 & 1010 = 1000
+    ]
+    print("  --- AND ---")
+    for a, b, expected in and_cases:
+        prog, exp = make_bitwise_binary(OP_AND, a, b)
+        assert exp == expected, f"Generator bug: AND({a},{b}) exp={expected} got={exp}"
+        for label, executor in [("numpy", np_exec), ("torch", pt_exec)]:
+            trace = executor.execute(prog)
+            top = trace.steps[-1].top if trace.steps else None
+            ok = (top == expected)
+            if ok: passed += 1
+            total += 1
+            status = "PASS" if ok else "FAIL"
+            print(f"  {status}  {label:5s}  AND({a:#x},{b:#x})→{expected:#x}  got={top}")
+
+    # OR tests
+    or_cases = [
+        (0xF0, 0x0F, 0xFF),
+        (0x00, 0x00, 0x00),
+        (0xAA, 0x55, 0xFF),
+        (12, 10, 14),       # 1100 | 1010 = 1110
+    ]
+    print("\n  --- OR ---")
+    for a, b, expected in or_cases:
+        prog, exp = make_bitwise_binary(OP_OR, a, b)
+        assert exp == expected
+        for label, executor in [("numpy", np_exec), ("torch", pt_exec)]:
+            trace = executor.execute(prog)
+            top = trace.steps[-1].top if trace.steps else None
+            ok = (top == expected)
+            if ok: passed += 1
+            total += 1
+            status = "PASS" if ok else "FAIL"
+            print(f"  {status}  {label:5s}  OR({a:#x},{b:#x})→{expected:#x}  got={top}")
+
+    # XOR tests
+    xor_cases = [
+        (0xFF, 0xFF, 0x00),
+        (0xFF, 0x00, 0xFF),
+        (0xAA, 0x55, 0xFF),
+        (12, 10, 6),       # 1100 ^ 1010 = 0110
+    ]
+    print("\n  --- XOR ---")
+    for a, b, expected in xor_cases:
+        prog, exp = make_bitwise_binary(OP_XOR, a, b)
+        assert exp == expected
+        for label, executor in [("numpy", np_exec), ("torch", pt_exec)]:
+            trace = executor.execute(prog)
+            top = trace.steps[-1].top if trace.steps else None
+            ok = (top == expected)
+            if ok: passed += 1
+            total += 1
+            status = "PASS" if ok else "FAIL"
+            print(f"  {status}  {label:5s}  XOR({a:#x},{b:#x})→{expected:#x}  got={top}")
+
+    # SHL tests (PUSH a, PUSH b → b is shift count, a is value to shift)
+    # make_bitwise_binary(OP_SHL, a, b): val_a=b, val_b=a → result = a << b
+    shl_cases = [
+        (1, 0, 1),         # 1 << 0 = 1
+        (1, 1, 2),         # 1 << 1 = 2
+        (1, 4, 16),        # 1 << 4 = 16
+        (0xFF, 4, 0xFF0),  # 255 << 4 = 4080
+        (1, 31, 0x80000000),  # 1 << 31
+    ]
+    print("\n  --- SHL ---")
+    for a, b, expected in shl_cases:
+        prog, exp = make_bitwise_binary(OP_SHL, a, b)
+        assert exp == expected, f"Generator bug: SHL({a},{b}) exp={expected} got={exp}"
+        for label, executor in [("numpy", np_exec), ("torch", pt_exec)]:
+            trace = executor.execute(prog)
+            top = trace.steps[-1].top if trace.steps else None
+            ok = (top == expected)
+            if ok: passed += 1
+            total += 1
+            status = "PASS" if ok else "FAIL"
+            print(f"  {status}  {label:5s}  SHL({a},{b})→{expected}  got={top}")
+
+    # SHR_U tests (logical shift right)
+    # make_bitwise_binary(OP_SHR_U, a, b): val_a=b, val_b=a → result = a >> b
+    shr_u_cases = [
+        (16, 1, 8),        # 16 >> 1 = 8
+        (255, 4, 15),      # 255 >> 4 = 15
+        (0x80000000, 31, 1),  # high bit >> 31 = 1 (logical, no sign extension)
+        (1, 0, 1),         # n >> 0 = n
+    ]
+    print("\n  --- SHR_U ---")
+    for a, b, expected in shr_u_cases:
+        prog, exp = make_bitwise_binary(OP_SHR_U, a, b)
+        assert exp == expected, f"Generator bug: SHR_U({a},{b}) exp={expected} got={exp}"
+        for label, executor in [("numpy", np_exec), ("torch", pt_exec)]:
+            trace = executor.execute(prog)
+            top = trace.steps[-1].top if trace.steps else None
+            ok = (top == expected)
+            if ok: passed += 1
+            total += 1
+            status = "PASS" if ok else "FAIL"
+            print(f"  {status}  {label:5s}  SHR_U({a},{b})→{expected}  got={top}")
+
+    # SHR_S tests (arithmetic shift right)
+    # For positive values, same as SHR_U
+    shr_s_cases = [
+        (16, 1, 8),
+        (255, 4, 15),
+    ]
+    print("\n  --- SHR_S (positive values) ---")
+    for a, b, expected in shr_s_cases:
+        prog, exp = make_bitwise_binary(OP_SHR_S, a, b)
+        assert exp == expected, f"Generator bug: SHR_S({a},{b}) exp={expected} got={exp}"
+        for label, executor in [("numpy", np_exec), ("torch", pt_exec)]:
+            trace = executor.execute(prog)
+            top = trace.steps[-1].top if trace.steps else None
+            ok = (top == expected)
+            if ok: passed += 1
+            total += 1
+            status = "PASS" if ok else "FAIL"
+            print(f"  {status}  {label:5s}  SHR_S({a},{b})→{expected}  got={top}")
+
+    # ROTL tests
+    # make_bitwise_binary(OP_ROTL, a, b): val_a=b, val_b=a → rotl(a, b)
+    rotl_cases = [
+        (1, 1, 2),                # rotl(1, 1) = 2
+        (0x80000000, 1, 1),       # rotl(high_bit, 1) = 1 (wraps around)
+        (0xFF, 8, 0xFF00),        # rotl(0xFF, 8) = 0xFF00
+    ]
+    print("\n  --- ROTL ---")
+    for a, b, expected in rotl_cases:
+        prog, exp = make_bitwise_binary(OP_ROTL, a, b)
+        assert exp == expected, f"Generator bug: ROTL({a},{b}) exp={expected} got={exp}"
+        for label, executor in [("numpy", np_exec), ("torch", pt_exec)]:
+            trace = executor.execute(prog)
+            top = trace.steps[-1].top if trace.steps else None
+            ok = (top == expected)
+            if ok: passed += 1
+            total += 1
+            status = "PASS" if ok else "FAIL"
+            print(f"  {status}  {label:5s}  ROTL({a:#x},{b})→{expected:#x}  got={top}")
+
+    # ROTR tests
+    # make_bitwise_binary(OP_ROTR, a, b): val_a=b, val_b=a → rotr(a, b)
+    rotr_cases = [
+        (2, 1, 1),                # rotr(2, 1) = 1
+        (1, 1, 0x80000000),       # rotr(1, 1) = high bit
+        (0xFF00, 8, 0xFF),        # rotr(0xFF00, 8) = 0xFF
+    ]
+    print("\n  --- ROTR ---")
+    for a, b, expected in rotr_cases:
+        prog, exp = make_bitwise_binary(OP_ROTR, a, b)
+        assert exp == expected, f"Generator bug: ROTR({a},{b}) exp={expected} got={exp}"
+        for label, executor in [("numpy", np_exec), ("torch", pt_exec)]:
+            trace = executor.execute(prog)
+            top = trace.steps[-1].top if trace.steps else None
+            ok = (top == expected)
+            if ok: passed += 1
+            total += 1
+            status = "PASS" if ok else "FAIL"
+            print(f"  {status}  {label:5s}  ROTR({a:#x},{b})→{expected:#x}  got={top}")
+
+    # Verify trace match across all bitwise tests
+    all_cases = (
+        [(OP_AND, a, b) for a, b, _ in and_cases] +
+        [(OP_OR, a, b) for a, b, _ in or_cases] +
+        [(OP_XOR, a, b) for a, b, _ in xor_cases] +
+        [(OP_SHL, a, b) for a, b, _ in shl_cases] +
+        [(OP_SHR_U, a, b) for a, b, _ in shr_u_cases] +
+        [(OP_SHR_S, a, b) for a, b, _ in shr_s_cases] +
+        [(OP_ROTL, a, b) for a, b, _ in rotl_cases] +
+        [(OP_ROTR, a, b) for a, b, _ in rotr_cases]
+    )
+    trace_pass = 0
+    trace_total = len(all_cases)
+    for op, a, b in all_cases:
+        prog, _ = make_bitwise_binary(op, a, b)
+        np_trace = np_exec.execute(prog)
+        pt_trace = pt_exec.execute(prog)
+        match, _ = compare_traces(np_trace, pt_trace)
+        if match: trace_pass += 1
+
+    print(f"\n  Unit tests: {passed}/{total} passed")
+    print(f"  Trace match: {trace_pass}/{trace_total} numpy==pytorch")
+    return passed == total and trace_pass == trace_total
+
+
+def test_bitwise_algorithms():
+    """Test programs combining bitwise ops: popcount, bit extract."""
+    print("\n" + "=" * 60)
+    print("Test 12: Bitwise Algorithms (popcount, bit extract)")
+    print("=" * 60)
+
+    np_exec = Phase14Executor()
+    pt_exec = Phase14PyTorchExecutor()
+
+    passed = 0
+    total = 0
+
+    # Popcount via loop
+    print("  --- popcount (AND + SHR_U loop) ---")
+    popcount_cases = [0, 1, 3, 7, 15, 255, 0xFFFF]
+    for n in popcount_cases:
+        prog, expected = make_popcount_loop(n)
+        ok, steps = test_algorithm(f"popcount({n})", prog, expected, np_exec, pt_exec, verbose=True)
+        if ok:
+            passed += 1
+            print(f"         {steps} steps for {bin(n & MASK32).count('1')} set bits")
+        total += 1
+
+    # Bit extraction
+    print("\n  --- bit extract (SHR_U + AND) ---")
+    bit_cases = [
+        (0xFF, 0), (0xFF, 4), (0xFF, 7), (0xFF, 8),
+        (0x80000000, 31), (0x80000000, 30),
+        (42, 0), (42, 1), (42, 3), (42, 5),
+    ]
+    for n, bit in bit_cases:
+        prog, expected = make_bit_extract(n, bit)
+        ok, steps = test_algorithm(f"bit({n:#x}[{bit}])", prog, expected, np_exec, pt_exec, verbose=True)
+        if ok: passed += 1
+        total += 1
+
+    print(f"\n  Result: {passed}/{total} passed")
+    return passed == total
+
+
 # ─── Main ─────────────────────────────────────────────────────────
 
 def main():
     print("=" * 60)
-    print("Phase 14: Extended ISA — Chunks 1+2: Arithmetic & Comparisons")
+    print("Phase 14: Extended ISA — Chunks 1-3: Arithmetic, Comparisons & Bitwise")
     print("=" * 60)
     print(f"  Chunk 1 ops:   MUL, DIV_S, DIV_U, REM_S, REM_U")
     print(f"  Chunk 2 ops:   EQZ, EQ, NE, LT/GT/LE/GE_S/U")
+    print(f"  Chunk 3 ops:   AND, OR, XOR, SHL, SHR_S, SHR_U, ROTL, ROTR")
     print(f"  Trap opcode:   OP_TRAP ({OP_TRAP}) — division by zero")
     print(f"  Total ISA:     {N_OPCODES} opcodes")
     print(f"  Architecture:  Linear + nonlinear FF dispatch")
@@ -1619,6 +2190,10 @@ def main():
     # Chunk 2 tests (comparisons)
     results.append(("Comparison unit",     test_comparison_unit()))
     results.append(("Comparison algos",    test_comparison_algorithms()))
+
+    # Chunk 3 tests (bitwise)
+    results.append(("Bitwise unit",        test_bitwise_unit()))
+    results.append(("Bitwise algos",       test_bitwise_algorithms()))
 
     # Shared tests
     results.append(("Regression",          test_regression()))
@@ -1641,9 +2216,10 @@ def main():
     print(f"\n  Time: {elapsed:.2f}s")
 
     if all_pass:
-        print(f"\n  ✓ Phase 14 Chunks 1+2 complete: {N_OPCODES}-opcode ISA")
+        print(f"\n  ✓ Phase 14 Chunks 1-3 complete: {N_OPCODES}-opcode ISA")
         print(f"    Arithmetic ops collapse O(n) repeated-op algorithms to O(1).")
         print(f"    Comparison ops enable native branching (max, abs, clamp).")
+        print(f"    Bitwise ops enable bit manipulation (popcount, extract, masks).")
         print(f"    Division by zero traps cleanly (OP_TRAP).")
         print(f"    Nonlinear FF dispatch extends the compiled transformer paradigm.")
         print(f"    All Phase 4/11/13 tests pass (full backward compatibility).")
