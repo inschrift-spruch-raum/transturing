@@ -172,6 +172,26 @@ Phase 13 proves the compiled transformer is a general-purpose stack computer, no
 
 ## Development Notes
 
+### File Reading Discipline
+
+**Read aggressively, in bulk.** Do not do read-think-read-think loops over the same file. When you need to understand a file:
+
+1. Read the ENTIRE file in one shot (or in 2-3 large chunks for files >500 lines)
+2. THEN think about what you've read
+3. THEN act
+
+**Anti-pattern** (wastes 4 tool calls and 3 thinking rounds):
+```
+Read phase13 lines 1-150 → think → Read phase13 lines 150-250 → think → Read phase13 lines 250-350 → think → "Now I have the full picture"
+```
+
+**Correct** (1 tool call):
+```
+Read phase13 (entire file) → "Now I have the full picture"
+```
+
+When multiple files need reading, batch them into a single tool call where possible. The goal is to front-load context acquisition and minimize round-trips between reading and doing.
+
 ### Container Constraints
 - Claude.ai containers: ~200s bash timeout, ~15 min session limit, 8GB RAM
 - CCotw (Claude Code on the web): 600s bash timeout, longer sessions, 16GB RAM — better for compute
