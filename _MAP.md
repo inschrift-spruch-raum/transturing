@@ -1,5 +1,9 @@
 # lac/
-*Files: 37*
+*Files: 38 | Subdirectories: 1*
+
+## Subdirectories
+
+- [src/](./src/_MAP.md)
 
 ## Files
 
@@ -32,7 +36,8 @@
 - Phase 13: ISA Completeness `h2` :528
 - Final Summary: All Phases `h2` :551
 - Key Insights Across All Phases `h2` :569
-- Files `h2` :579
+- Tier 3: Type System and Float Scope (Issue #37) `h2` :579
+- Files `h2` :617
 
 ### RD-PLAN.md
 - R&D Plan: Prototyping 2D Convex Hull Attention for In-Model Execution `h1` :1
@@ -72,15 +77,15 @@
 ### executor.py
 > Imports: `torch, isa`
 - **NumPyExecutor** (C) :55
-  - **execute** (m) `(self, prog, max_steps=5000)` :61
+  - **execute** (m) `(self, prog, max_steps=50000)` :61
 - **CompiledModel** (C) :456
   - **__init__** (m) `(self, d_model=D_MODEL)` :478
   - **_compile_weights** (m) `(self)` :503
   - **forward** (m) `(self, query_emb, prog_embs, stack_embs, local_embs=None, heap_embs=None,
                 call_embs=None, locals_base=0)` :720
-- **TorchExecutor** (C) :878
-  - **__init__** (m) `(self, model=None)` :884
-  - **execute** (m) `(self, prog, max_steps=5000)` :888
+- **TorchExecutor** (C) :881
+  - **__init__** (m) `(self, model=None)` :887
+  - **execute** (m) `(self, prog, max_steps=50000)` :891
 
 ### isa.py
 > Imports: `torch, typing, dataclasses`
@@ -433,6 +438,22 @@
 - **benchmark_query_scaling** (f) `()` :311
 - **benchmark_execution_trace** (f) `()` :400
 - **benchmark_scaling_fit** (f) `()` :445
+
+### phase20_type_masking_tests.py
+> Imports: `sys, os, isa, executor, assembler`
+- **prog_add_overflow** (f) `()` :40
+- **prog_mul_overflow** (f) `()` :54
+- **prog_sub_wrap** (f) `()` :68
+- **prog_neg_positive** (f) `()` :83
+- **prog_loop_add_overflow** (f) `()` :96
+- **prog_if_overflow_branch** (f) `()` :143
+- **prog_br_table_overflow** (f) `()` :166
+- **prog_overflow_in_else** (f) `()` :203
+- **test_masking_programs** (f) `(verbose=False)` :239
+- **test_trace_match** (f) `()` :270
+- **test_without_masking_would_fail** (f) `()` :295
+- **test_regression** (f) `()` :326
+- **main** (f) `()` :360
 
 ### phase2_parabolic.py
 > Imports: `json`
