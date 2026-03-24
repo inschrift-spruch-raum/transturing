@@ -99,12 +99,14 @@ struct CallFrame(Copyable, Movable):
 
 # ─── Parabolic memory primitives ─────────────────────────────────
 
-def mem_write(mut keys: List[KV], addr: Int, val: Int, write_count: Int):
+@always_inline
+fn mem_write(mut keys: List[KV], addr: Int, val: Int, write_count: Int):
     var a = Float64(addr)
     keys.append(KV(2.0 * a, -(a * a) + EPS * Float64(write_count), val))
 
 
-def mem_read(keys: List[KV], addr: Int) -> Int:
+@always_inline
+fn mem_read(keys: List[KV], addr: Int) -> Int:
     if len(keys) == 0:
         return 0
     var q0 = Float64(addr)
@@ -124,7 +126,8 @@ def mem_read(keys: List[KV], addr: Int) -> Int:
 
 # ─── Math helpers ────────────────────────────────────────────────
 
-def mask32(v: Int) -> Int:
+@always_inline
+fn mask32(v: Int) -> Int:
     return v & MASK32
 
 
@@ -150,16 +153,19 @@ def trunc_rem(b: Int, a: Int) -> Int:
     return b - trunc_div(b, a) * a
 
 
-def to_i32(val: Int) -> Int:
+@always_inline
+fn to_i32(val: Int) -> Int:
     return val & MASK32
 
 
-def shr_u(b: Int, a: Int) -> Int:
+@always_inline
+fn shr_u(b: Int, a: Int) -> Int:
     """Logical (unsigned) right shift."""
     return to_i32(b) >> (a & 31)
 
 
-def shr_s(b: Int, a: Int) -> Int:
+@always_inline
+fn shr_s(b: Int, a: Int) -> Int:
     """Arithmetic (signed) right shift."""
     var v = to_i32(b)
     var shift = a & 31
@@ -171,7 +177,8 @@ def shr_s(b: Int, a: Int) -> Int:
     return result
 
 
-def rotl32(b: Int, a: Int) -> Int:
+@always_inline
+fn rotl32(b: Int, a: Int) -> Int:
     var v = to_i32(b)
     var shift = a & 31
     if shift == 0:
@@ -179,7 +186,8 @@ def rotl32(b: Int, a: Int) -> Int:
     return ((v << shift) | (v >> (32 - shift))) & MASK32
 
 
-def rotr32(b: Int, a: Int) -> Int:
+@always_inline
+fn rotr32(b: Int, a: Int) -> Int:
     var v = to_i32(b)
     var shift = a & 31
     if shift == 0:
@@ -187,7 +195,8 @@ def rotr32(b: Int, a: Int) -> Int:
     return ((v >> shift) | (v << (32 - shift))) & MASK32
 
 
-def clz32(val: Int) -> Int:
+@always_inline
+fn clz32(val: Int) -> Int:
     var v = to_i32(val)
     if v == 0:
         return 32
@@ -209,7 +218,8 @@ def clz32(val: Int) -> Int:
     return n
 
 
-def ctz32(val: Int) -> Int:
+@always_inline
+fn ctz32(val: Int) -> Int:
     var v = to_i32(val)
     if v == 0:
         return 32
@@ -231,7 +241,8 @@ def ctz32(val: Int) -> Int:
     return n
 
 
-def popcnt32(val: Int) -> Int:
+@always_inline
+fn popcnt32(val: Int) -> Int:
     var v = to_i32(val)
     v = v - ((v >> 1) & 0x55555555)
     v = (v & 0x33333333) + ((v >> 2) & 0x33333333)
@@ -242,7 +253,8 @@ def popcnt32(val: Int) -> Int:
     # fix: return the standard result
 
 
-def _popcnt32(val: Int) -> Int:
+@always_inline
+fn _popcnt32(val: Int) -> Int:
     """Correct popcount for 32-bit value."""
     var v = to_i32(val)
     var count = 0
@@ -252,14 +264,16 @@ def _popcnt32(val: Int) -> Int:
     return count
 
 
-def sign_extend_8(val: Int) -> Int:
+@always_inline
+fn sign_extend_8(val: Int) -> Int:
     var v = val & 0xFF
     if v >= 0x80:
         return v - 0x100
     return v
 
 
-def sign_extend_16(val: Int) -> Int:
+@always_inline
+fn sign_extend_16(val: Int) -> Int:
     var v = val & 0xFFFF
     if v >= 0x8000:
         return v - 0x10000
