@@ -565,12 +565,12 @@ def make_native_abs_unary(n):
     ], abs(int(n))
 
 def make_native_neg(n):
-    """Negate n using native NEG."""
+    """Negate n using native NEG. Result is i32-masked (WASM overflow semantics)."""
     return [
         Instruction(OP_PUSH, n),
         Instruction(OP_NEG),
         Instruction(OP_HALT),
-    ], -int(n)
+    ], (-int(n)) & 0xFFFFFFFF
 
 def make_select(a, b, c):
     """SELECT: push a, b, c; SELECT pops all three -> (c!=0 ? a : b)."""

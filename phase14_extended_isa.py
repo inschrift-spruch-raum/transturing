@@ -603,7 +603,7 @@ class Phase14Executor(Phase13Executor):
                 top = result
             elif op == OP_NEG:
                 val_a = stack_read(sp)
-                result = -int(val_a)
+                result = (-int(val_a)) & MASK32
                 stack_write(sp, result)
                 top = result
             elif op == OP_SELECT:
@@ -895,7 +895,7 @@ class Phase14Model(Phase13Model):
         nonlinear[OPCODE_IDX[OP_CTZ]]    = float(_ctz32(va))
         nonlinear[OPCODE_IDX[OP_POPCNT]] = float(_popcnt32(va))
         nonlinear[OPCODE_IDX[OP_ABS]]    = float(abs(int(va)))
-        nonlinear[OPCODE_IDX[OP_NEG]]    = float(-int(va))
+        nonlinear[OPCODE_IDX[OP_NEG]]    = float((-int(va)) & MASK32)
 
         # Parametric: SELECT — c≠0 ? a : b where c=va(sp), b=vb(sp-1), a=vc(sp-2)
         vc = round(val_c.item())
@@ -1534,12 +1534,12 @@ def make_native_abs(n):
     ], abs(int(n))
 
 def make_native_neg(n):
-    """Negate n using native NEG. 3 instructions."""
+    """Negate n using native NEG. Result is i32-masked (WASM overflow semantics)."""
     return [
         Instruction(OP_PUSH, n),
         Instruction(OP_NEG),
         Instruction(OP_HALT),
-    ], -int(n)
+    ], (-int(n)) & 0xFFFFFFFF
 
 def make_select(a, b, c):
     """SELECT: push a, b, c; SELECT pops all three → (c≠0 ? a : b).
@@ -2470,15 +2470,15 @@ def test_unary_unit():
         ("abs_neg_one",
          [Instruction(OP_PUSH, -1), Instruction(OP_ABS), Instruction(OP_HALT)], 1),
 
-        # NEG: negate
+        # NEG: negate (i32-masked per WASM overflow semantics)
         ("neg_positive",
-         [Instruction(OP_PUSH, 5), Instruction(OP_NEG), Instruction(OP_HALT)], -5),
+         [Instruction(OP_PUSH, 5), Instruction(OP_NEG), Instruction(OP_HALT)], (-5) & 0xFFFFFFFF),
         ("neg_zero",
          [Instruction(OP_PUSH, 0), Instruction(OP_NEG), Instruction(OP_HALT)], 0),
         ("neg_negative",
          [Instruction(OP_PUSH, -3), Instruction(OP_NEG), Instruction(OP_HALT)], 3),
         ("neg_large",
-         [Instruction(OP_PUSH, 1000), Instruction(OP_NEG), Instruction(OP_HALT)], -1000),
+         [Instruction(OP_PUSH, 1000), Instruction(OP_NEG), Instruction(OP_HALT)], (-1000) & 0xFFFFFFFF),
     ]
 
     passed = 0

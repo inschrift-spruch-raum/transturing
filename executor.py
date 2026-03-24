@@ -153,14 +153,14 @@ class NumPyExecutor:
             elif op == OP_ADD:
                 val_a = stack_read(sp)
                 val_b = stack_read(sp - 1)
-                result = val_a + val_b
+                result = (val_a + val_b) & MASK32
                 sp -= 1
                 stack_write(sp, result)
                 top = result
             elif op == OP_SUB:
                 val_a = stack_read(sp)
                 val_b = stack_read(sp - 1)
-                result = val_b - val_a
+                result = (val_b - val_a) & MASK32
                 sp -= 1
                 stack_write(sp, result)
                 top = result
@@ -195,7 +195,7 @@ class NumPyExecutor:
             elif op == OP_MUL:
                 val_a = stack_read(sp)
                 val_b = stack_read(sp - 1)
-                result = val_a * val_b
+                result = (val_a * val_b) & MASK32
                 sp -= 1
                 stack_write(sp, result)
                 top = result
@@ -205,7 +205,7 @@ class NumPyExecutor:
                     trace.steps.append(TraceStep(OP_TRAP, 0, sp, 0))
                     break
                 val_b = stack_read(sp - 1)
-                result = _trunc_div(val_b, val_a)
+                result = _trunc_div(val_b, val_a) & MASK32
                 sp -= 1
                 stack_write(sp, result)
                 top = result
@@ -215,7 +215,7 @@ class NumPyExecutor:
                     trace.steps.append(TraceStep(OP_TRAP, 0, sp, 0))
                     break
                 val_b = stack_read(sp - 1)
-                result = _trunc_rem(val_b, val_a)
+                result = _trunc_rem(val_b, val_a) & MASK32
                 sp -= 1
                 stack_write(sp, result)
                 top = result
@@ -327,7 +327,7 @@ class NumPyExecutor:
                 top = result
             elif op == OP_NEG:
                 val_a = stack_read(sp)
-                result = -int(val_a)
+                result = (-int(val_a)) & MASK32
                 stack_write(sp, result)
                 top = result
             elif op == OP_SELECT:
@@ -672,10 +672,10 @@ class CompiledModel(nn.Module):
             #                         arg  va   vb   vc   lv   hv
             self.M_top[0]  = torch.tensor([ 1.,  0.,  0.,  0.,  0.,  0.])  # PUSH: top = arg
             self.M_top[1]  = torch.tensor([ 0.,  0.,  1.,  0.,  0.,  0.])  # POP:  top = val_b
-            self.M_top[2]  = torch.tensor([ 0.,  1.,  1.,  0.,  0.,  0.])  # ADD:  top = va + vb
+            self.M_top[2]  = torch.tensor([ 0.,  0.,  0.,  0.,  0.,  0.])  # ADD:  nonlinear (i32-masked)
             self.M_top[3]  = torch.tensor([ 0.,  1.,  0.,  0.,  0.,  0.])  # DUP:  top = va
             self.M_top[4]  = torch.tensor([ 0.,  1.,  0.,  0.,  0.,  0.])  # HALT: top = va
-            self.M_top[5]  = torch.tensor([ 0., -1.,  1.,  0.,  0.,  0.])  # SUB:  top = vb - va
+            self.M_top[5]  = torch.tensor([ 0.,  0.,  0.,  0.,  0.,  0.])  # SUB:  nonlinear (i32-masked)
             self.M_top[6]  = torch.tensor([ 0.,  0.,  1.,  0.,  0.,  0.])  # JZ:   top = vb
             self.M_top[7]  = torch.tensor([ 0.,  0.,  1.,  0.,  0.,  0.])  # JNZ:  top = vb
             self.M_top[8]  = torch.tensor([ 0.,  1.,  0.,  0.,  0.,  0.])  # NOP:  top = va
@@ -815,12 +815,15 @@ class CompiledModel(nn.Module):
         vb = round(val_b.item())
 
         nonlinear = torch.zeros(N_OPCODES, dtype=DTYPE)
-        nonlinear[OPCODE_IDX[OP_MUL]] = float(va * vb)
+        # Arithmetic ops — i32-masked per WASM overflow semantics
+        nonlinear[OPCODE_IDX[OP_ADD]] = float((va + vb) & MASK32)
+        nonlinear[OPCODE_IDX[OP_SUB]] = float((vb - va) & MASK32)
+        nonlinear[OPCODE_IDX[OP_MUL]] = float((va * vb) & MASK32)
         if va != 0:
-            nonlinear[OPCODE_IDX[OP_DIV_S]] = float(_trunc_div(vb, va))
-            nonlinear[OPCODE_IDX[OP_DIV_U]] = float(_trunc_div(vb, va))
-            nonlinear[OPCODE_IDX[OP_REM_S]] = float(_trunc_rem(vb, va))
-            nonlinear[OPCODE_IDX[OP_REM_U]] = float(_trunc_rem(vb, va))
+            nonlinear[OPCODE_IDX[OP_DIV_S]] = float(_trunc_div(vb, va) & MASK32)
+            nonlinear[OPCODE_IDX[OP_DIV_U]] = float(_trunc_div(vb, va) & MASK32)
+            nonlinear[OPCODE_IDX[OP_REM_S]] = float(_trunc_rem(vb, va) & MASK32)
+            nonlinear[OPCODE_IDX[OP_REM_U]] = float(_trunc_rem(vb, va) & MASK32)
 
         # Comparison ops
         nonlinear[OPCODE_IDX[OP_EQZ]]  = 1.0 if va == 0 else 0.0
@@ -850,7 +853,7 @@ class CompiledModel(nn.Module):
         nonlinear[OPCODE_IDX[OP_CTZ]]    = float(_ctz32(va))
         nonlinear[OPCODE_IDX[OP_POPCNT]] = float(_popcnt32(va))
         nonlinear[OPCODE_IDX[OP_ABS]]    = float(abs(int(va)))
-        nonlinear[OPCODE_IDX[OP_NEG]]    = float(-int(va))
+        nonlinear[OPCODE_IDX[OP_NEG]]    = float((-int(va)) & MASK32)
 
         # Parametric: SELECT
         vc = round(val_c.item())
