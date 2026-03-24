@@ -294,6 +294,12 @@ def execute(prog_ops: List[Int], prog_args: List[Int], verbose: Bool = True) rai
     var heap_keys   = List[KV]()
     var call_stack  = List[CallFrame]()
 
+    # Pre-allocate capacity based on program size (opt 2)
+    var est_cap = len(prog_ops) * 3  # ~3 writes per instruction estimate
+    stack_keys.reserve(est_cap)
+    locals_keys.reserve(est_cap // 2)
+    heap_keys.reserve(est_cap // 2)
+
     var stack_wc  = 0
     var local_wc  = 0
     var heap_wc   = 0
