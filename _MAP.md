@@ -1,5 +1,5 @@
 # lac/
-*Files: 32*
+*Files: 34*
 
 ## Files
 
@@ -67,29 +67,32 @@
 
 ### executor.py
 > Imports: `torch, isa`
-- **NumPyExecutor** (C) :45
-  - **execute** (m) `(self, prog, max_steps=5000)` :51
-- **CompiledModel** (C) :352
-  - **__init__** (m) `(self, d_model=D_MODEL)` :373
-  - **_compile_weights** (m) `(self)` :393
-  - **forward** (m) `(self, query_emb, prog_embs, stack_embs, local_embs=None)` :541
-- **TorchExecutor** (C) :672
-  - **__init__** (m) `(self, model=None)` :678
-  - **execute** (m) `(self, prog, max_steps=5000)` :682
+- **NumPyExecutor** (C) :55
+  - **execute** (m) `(self, prog, max_steps=5000)` :61
+- **CompiledModel** (C) :456
+  - **__init__** (m) `(self, d_model=D_MODEL)` :478
+  - **_compile_weights** (m) `(self)` :503
+  - **forward** (m) `(self, query_emb, prog_embs, stack_embs, local_embs=None, heap_embs=None,
+                call_embs=None, locals_base=0)` :720
+- **TorchExecutor** (C) :878
+  - **__init__** (m) `(self, model=None)` :884
+  - **execute** (m) `(self, prog, max_steps=5000)` :888
 
 ### isa.py
 > Imports: `torch, typing, dataclasses`
-- **program** (f) `(*instrs)` :36
-- **CompiledAttentionHead** (C) :372
-  - **__init__** (m) `(self, d_model=D_MODEL, head_dim=2, v_dim=1, use_bias_q=False)` :386
-  - **forward** (m) `(self, query_emb, memory_embs)` :393
-- **embed_program_token** (f) `(pos, instr)` :421
-- **embed_stack_entry** (f) `(addr, value, write_order)` :436
-- **embed_local_entry** (f) `(local_idx, value, write_order)` :447
-- **embed_state** (f) `(ip, sp)` :458
-- **compare_traces** (f) `(trace_a, trace_b)` :470
-- **test_algorithm** (f) `(name, prog, expected, np_exec, pt_exec, verbose=False)` :480
-- **test_trap_algorithm** (f) `(name, prog, np_exec, pt_exec, verbose=False)` :509
+- **program** (f) `(*instrs)` :37
+- **CompiledAttentionHead** (C) :430
+  - **__init__** (m) `(self, d_model=D_MODEL, head_dim=2, v_dim=1, use_bias_q=False)` :444
+  - **forward** (m) `(self, query_emb, memory_embs)` :451
+- **embed_program_token** (f) `(pos, instr)` :479
+- **embed_stack_entry** (f) `(addr, value, write_order)` :494
+- **embed_local_entry** (f) `(local_idx, value, write_order)` :505
+- **embed_heap_entry** (f) `(addr, value, write_order)` :516
+- **embed_call_frame** (f) `(depth, ret_addr, saved_sp, locals_base, write_order)` :527
+- **embed_state** (f) `(ip, sp)` :540
+- **compare_traces** (f) `(trace_a, trace_b)` :552
+- **test_algorithm** (f) `(name, prog, expected, np_exec, pt_exec, verbose=False)` :562
+- **test_trap_algorithm** (f) `(name, prog, np_exec, pt_exec, verbose=False)` :591
 
 ### phase10_digit_decomposition.py
 > Imports: `torch, torch.utils.data, random, time, json`...
@@ -328,8 +331,44 @@
 - **test_local_variables** (f) `()` :190
 - **test_regression** (f) `()` :213
 - **test_model_summary** (f) `()` :270
-- **test_invariants** (f) `()` :332
-- **main** (f) `()` :417
+- **test_invariants** (f) `()` :336
+- **main** (f) `()` :421
+
+### phase16_linear_memory.py
+> Imports: `sys, os, time, isa, executor`...
+- **test_store_and_load** (f) `()` :35
+- **test_multiple_addresses** (f) `()` :48
+- **test_uninitialized_load** (f) `()` :77
+- **test_overwrite_memory** (f) `()` :87
+- **test_store8_mask** (f) `()` :103
+- **test_store16_mask** (f) `()` :116
+- **test_load8_u** (f) `()` :129
+- **test_load8_s** (f) `()` :142
+- **test_load16_u** (f) `()` :155
+- **test_load16_s** (f) `()` :168
+- **test_array_sum** (f) `()` :181
+- **test_memory_with_locals** (f) `()` :224
+- **test_linear_memory** (f) `()` :262
+- **test_regression** (f) `()` :285
+- **test_model_summary** (f) `()` :351
+- **test_invariants** (f) `()` :415
+- **main** (f) `()` :541
+
+### phase17_function_calls.py
+> Imports: `sys, os, time, isa, executor`...
+- **test_simple_call** (f) `()` :33
+- **test_call_with_args** (f) `()` :49
+- **test_locals_scoping** (f) `()` :65
+- **test_nested_calls** (f) `()` :90
+- **test_recursive_factorial** (f) `()` :118
+- **test_recursive_factorial_10** (f) `()` :148
+- **test_return_without_call** (f) `()` :172
+- **test_locals_across_functions** (f) `()` :181
+- **test_function_calls** (f) `()` :227
+- **test_regression** (f) `()` :257
+- **test_model_summary** (f) `()` :328
+- **test_invariants** (f) `()` :388
+- **main** (f) `()` :456
 
 ### phase1_hull_cache.py
 > Imports: `time, json`
