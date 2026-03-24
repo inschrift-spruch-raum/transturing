@@ -178,6 +178,8 @@ fn mem_write_compact(mut ms: MemSpace, addr: Int, val: Int):
         compact(ms)
 
 
+comptime SIMD_W = 4  # SIMD width for dot-product scan
+
 @always_inline
 fn mem_read(ms: MemSpace, addr: Int) -> Int:
     var n = len(ms.k0s)
@@ -187,11 +189,30 @@ fn mem_read(ms: MemSpace, addr: Int) -> Int:
     var q1 = Float64(1.0)
     var best_idx = 0
     var best_score = ms.k0s[0] * q0 + ms.k1s[0] * q1
-    for i in range(1, n):
+
+    # SIMD-accelerated argmax scan over k0/k1 arrays
+    var q0_vec = SIMD[DType.float64, SIMD_W](q0)
+    var q1_vec = SIMD[DType.float64, SIMD_W](q1)
+    var k0_ptr = ms.k0s.unsafe_ptr()
+    var k1_ptr = ms.k1s.unsafe_ptr()
+
+    var i = 1
+    while i + SIMD_W <= n:
+        var scores = k0_ptr.load[width=SIMD_W](i) * q0_vec + k1_ptr.load[width=SIMD_W](i) * q1_vec
+        for j in range(SIMD_W):
+            if scores[j] > best_score:
+                best_score = scores[j]
+                best_idx = i + j
+        i += SIMD_W
+
+    # Scalar tail
+    while i < n:
         var score = ms.k0s[i] * q0 + ms.k1s[i] * q1
         if score > best_score:
             best_score = score
             best_idx = i
+        i += 1
+
     var stored_addr = Int(ms.k0s[best_idx] / 2.0 + 0.5)
     if stored_addr == addr:
         return ms.vals[best_idx]
