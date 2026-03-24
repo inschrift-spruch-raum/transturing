@@ -49,6 +49,10 @@ def program(*instrs) -> List[Instruction]:
         "CLZ": 37, "CTZ": 38, "POPCNT": 39, "ABS": 40, "NEG": 41,
         "SELECT": 42,
         "LOCAL.GET": 43, "LOCAL.SET": 44, "LOCAL.TEE": 45,
+        "I32.LOAD": 46, "I32.STORE": 47,
+        "I32.LOAD8_U": 48, "I32.LOAD8_S": 49,
+        "I32.LOAD16_U": 50, "I32.LOAD16_S": 51,
+        "I32.STORE8": 52, "I32.STORE16": 53,
     }
     for instr in instrs:
         if isinstance(instr, Instruction):
@@ -96,7 +100,7 @@ class Trace:
 
 # ─── Constants ────────────────────────────────────────────────────
 
-D_MODEL = 42
+D_MODEL = 45
 DTYPE = torch.float64
 EPS = 1e-6
 
@@ -150,6 +154,11 @@ DIM_LOCAL_KEY_1   = 38
 DIM_IS_LOCAL_GET  = 39
 DIM_IS_LOCAL_SET  = 40
 DIM_IS_LOCAL_TEE  = 41
+
+# Phase 16: linear memory (heap) address space
+DIM_IS_HEAP       = 42
+DIM_HEAP_KEY_0    = 43
+DIM_HEAP_KEY_1    = 44
 
 
 # ─── Opcodes ─────────────────────────────────────────────────────
@@ -215,10 +224,20 @@ OP_LOCAL_GET = 43
 OP_LOCAL_SET = 44
 OP_LOCAL_TEE = 45
 
+# Phase 16: linear memory
+OP_I32_LOAD    = 46
+OP_I32_STORE   = 47
+OP_I32_LOAD8_U = 48
+OP_I32_LOAD8_S = 49
+OP_I32_LOAD16_U = 50
+OP_I32_LOAD16_S = 51
+OP_I32_STORE8  = 52
+OP_I32_STORE16 = 53
+
 # Trap
 OP_TRAP  = 99
 
-N_OPCODES = 45  # 42 base + 3 local variable ops
+N_OPCODES = 53  # 45 base + 8 memory ops
 
 
 # ─── Maps ─────────────────────────────────────────────────────────
@@ -238,6 +257,10 @@ OP_NAMES = {
     OP_CLZ: "CLZ", OP_CTZ: "CTZ", OP_POPCNT: "POPCNT",
     OP_ABS: "ABS", OP_NEG: "NEG", OP_SELECT: "SELECT",
     OP_LOCAL_GET: "LOCAL.GET", OP_LOCAL_SET: "LOCAL.SET", OP_LOCAL_TEE: "LOCAL.TEE",
+    OP_I32_LOAD: "I32.LOAD", OP_I32_STORE: "I32.STORE",
+    OP_I32_LOAD8_U: "I32.LOAD8_U", OP_I32_LOAD8_S: "I32.LOAD8_S",
+    OP_I32_LOAD16_U: "I32.LOAD16_U", OP_I32_LOAD16_S: "I32.LOAD16_S",
+    OP_I32_STORE8: "I32.STORE8", OP_I32_STORE16: "I32.STORE16",
     OP_TRAP: "TRAP",
 }
 
@@ -271,6 +294,10 @@ OPCODE_IDX = {
     OP_CLZ: 36, OP_CTZ: 37, OP_POPCNT: 38, OP_ABS: 39, OP_NEG: 40,
     OP_SELECT: 41,
     OP_LOCAL_GET: 42, OP_LOCAL_SET: 43, OP_LOCAL_TEE: 44,
+    OP_I32_LOAD: 45, OP_I32_STORE: 46,
+    OP_I32_LOAD8_U: 47, OP_I32_LOAD8_S: 48,
+    OP_I32_LOAD16_U: 49, OP_I32_LOAD16_S: 50,
+    OP_I32_STORE8: 51, OP_I32_STORE16: 52,
 }
 
 NONLINEAR_OPS = {
@@ -282,6 +309,8 @@ NONLINEAR_OPS = {
     OP_SHL, OP_SHR_S, OP_SHR_U,
     OP_ROTL, OP_ROTR,
     OP_CLZ, OP_CTZ, OP_POPCNT, OP_ABS, OP_NEG, OP_SELECT,
+    OP_I32_LOAD8_U, OP_I32_LOAD8_S,
+    OP_I32_LOAD16_U, OP_I32_LOAD16_S,
 }
 
 
@@ -367,6 +396,18 @@ def _popcnt32(val):
     return bin(_to_i32(val)).count('1')
 
 
+def _sign_extend_8(val):
+    """Sign-extend an 8-bit value to a signed integer."""
+    v = int(val) & 0xFF
+    return v - 0x100 if v >= 0x80 else v
+
+
+def _sign_extend_16(val):
+    """Sign-extend a 16-bit value to a signed integer."""
+    v = int(val) & 0xFFFF
+    return v - 0x10000 if v >= 0x8000 else v
+
+
 # ─── Compiled Attention Head (from phase12) ───────────────────────
 
 class CompiledAttentionHead(nn.Module):
@@ -450,6 +491,17 @@ def embed_local_entry(local_idx, value, write_order):
     emb[DIM_IS_LOCAL]     = 1.0
     emb[DIM_LOCAL_KEY_0]  = 2.0 * local_idx
     emb[DIM_LOCAL_KEY_1]  = -float(local_idx * local_idx) + EPS * write_order
+    emb[DIM_VALUE]        = float(value)
+    emb[DIM_ONE]          = 1.0
+    return emb
+
+
+def embed_heap_entry(addr, value, write_order):
+    """Create embedding for a heap memory write record."""
+    emb = torch.zeros(D_MODEL, dtype=DTYPE)
+    emb[DIM_IS_HEAP]      = 1.0
+    emb[DIM_HEAP_KEY_0]   = 2.0 * addr
+    emb[DIM_HEAP_KEY_1]   = -float(addr * addr) + EPS * write_order
     emb[DIM_VALUE]        = float(value)
     emb[DIM_ONE]          = 1.0
     return emb

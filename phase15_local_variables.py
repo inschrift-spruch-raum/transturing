@@ -268,7 +268,7 @@ def test_regression():
 
 
 def test_model_summary():
-    """Verify model architecture: 7 heads, correct D_MODEL and N_OPCODES."""
+    """Verify model architecture: current heads, D_MODEL, N_OPCODES."""
     print("\n" + "=" * 60)
     print("Model Summary")
     print("=" * 60)
@@ -283,6 +283,10 @@ def test_model_summary():
         ("Head 5: local value", model.head_local_val),
         ("Head 6: local addr", model.head_local_addr),
     ]
+    # Include heap heads if they exist (Phase 16+)
+    if hasattr(model, 'head_heap_val'):
+        heads.append(("Head 7: heap value", model.head_heap_val))
+        heads.append(("Head 8: heap addr", model.head_heap_addr))
 
     total_params = 0
     for name, head in heads:
@@ -301,30 +305,30 @@ def test_model_summary():
 
     checks = []
 
-    # Verify head count
-    ok = len(heads) == 7
+    # Verify minimum head count (at least 7 for locals)
+    ok = len(heads) >= 7
     checks.append(ok)
-    print(f"\n  {'PASS' if ok else 'FAIL'}  Head count = {len(heads)} (expected 7)")
+    print(f"\n  {'PASS' if ok else 'FAIL'}  Head count = {len(heads)} (expected >= 7)")
 
-    # Verify D_MODEL expanded
-    ok = D_MODEL == 42
+    # Verify D_MODEL
+    ok = D_MODEL >= 42
     checks.append(ok)
-    print(f"  {'PASS' if ok else 'FAIL'}  D_MODEL = {D_MODEL} (expected 42)")
+    print(f"  {'PASS' if ok else 'FAIL'}  D_MODEL = {D_MODEL} (expected >= 42)")
 
     # Verify N_OPCODES
-    ok = N_OPCODES == 45
+    ok = N_OPCODES >= 45
     checks.append(ok)
-    print(f"  {'PASS' if ok else 'FAIL'}  N_OPCODES = {N_OPCODES} (expected 45)")
+    print(f"  {'PASS' if ok else 'FAIL'}  N_OPCODES = {N_OPCODES} (expected >= 45)")
 
     # Verify sp_deltas size
     ok = model.sp_deltas.shape[0] == N_OPCODES
     checks.append(ok)
     print(f"  {'PASS' if ok else 'FAIL'}  sp_deltas size = {model.sp_deltas.shape[0]} (expected {N_OPCODES})")
 
-    # Verify M_top size
-    ok = model.M_top.shape == (N_OPCODES, 5)
+    # Verify M_top rows match N_OPCODES
+    ok = model.M_top.shape[0] == N_OPCODES
     checks.append(ok)
-    print(f"  {'PASS' if ok else 'FAIL'}  M_top shape = {tuple(model.M_top.shape)} (expected ({N_OPCODES}, 5))")
+    print(f"  {'PASS' if ok else 'FAIL'}  M_top rows = {model.M_top.shape[0]} (expected {N_OPCODES})")
 
     return all(checks)
 
