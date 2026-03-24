@@ -297,11 +297,44 @@ def build_tier2_tests() -> list[tuple]:
     return tests
 
 
+def build_structured_tests() -> list[tuple]:
+    """Return phase19 structured control flow + phase20 i32 masking tests."""
+    tests = []
+
+    # Phase 19: structured assembler programs
+    try:
+        import phase19_structured_assembler as p19
+        for name, fn in p19.STRUCTURED_TESTS:
+            prog, _ = fn()
+            tests.append((f"p19/{name}", prog))
+    except (ImportError, Exception):
+        pass
+
+    # Phase 20: i32 masking tests
+    try:
+        import phase20_type_masking_tests as p20
+        for name, fn in p20.MASKING_TESTS:
+            prog, _ = fn()
+            tests.append((f"p20/{name}", prog))
+    except (ImportError, Exception):
+        pass
+
+    return tests
+
+
 # ─── Benchmark ───────────────────────────────────────────────────
 
-def benchmark_mojo(prog: list, n: int = 50) -> float:
-    """Return median wall-clock time in µs for the Mojo binary on prog."""
+def benchmark_mojo(prog: list, n: int = 200) -> float:
+    """Return median in-process execution time in µs via --repeat N."""
     tokens = instr_to_tokens(prog)
+    r = subprocess.run(
+        [BINARY, "--repeat", str(n)] + tokens,
+        capture_output=True, text=True, timeout=30,
+    )
+    for line in r.stdout.splitlines():
+        if line.startswith("TIMING_NS:"):
+            return int(line.split(":")[1].strip()) / 1000.0  # ns → µs
+    # Fallback: subprocess timing
     times = []
     for _ in range(n):
         t0 = time.perf_counter()
@@ -367,6 +400,22 @@ def main():
         print(f"  {p}/{t} passed")
         total_passed += p; total_tests += t
 
+    # ── Suite 3: Structured CF + i32 masking (phase19-20) ──
+    print()
+    print("=== Structured control flow + i32 masking (phase19-20) ===")
+    suite3 = build_structured_tests()
+    if not suite3:
+        print("  (no phase19/phase20 tests found — skipped)")
+    else:
+        p, t = 0, 0
+        for entry in suite3:
+            name, prog = entry[0], entry[1]
+            trap = len(entry) > 2 and entry[2]
+            ok = compare_program(name, prog, verbose=verbose, expect_trap=trap)
+            p += ok; t += 1
+        print(f"  {p}/{t} passed")
+        total_passed += p; total_tests += t
+
     # ── Benchmark ──
     if do_bench:
         print()
@@ -375,18 +424,21 @@ def main():
         prog_fib, _ = make_fibonacci(10)
         mojo_us  = benchmark_mojo(prog_fib)
         numpy_us = benchmark_numpy(prog_fib)
-        print(f"  fib(10): Mojo={mojo_us:.0f} µs, NumPy={numpy_us:.0f} µs  "
-              f"(ratio={mojo_us/numpy_us:.1f}x)")
+        speedup = numpy_us / mojo_us if mojo_us > 0 else float('inf')
+        print(f"  fib(10): Mojo={mojo_us:.1f} µs, NumPy={numpy_us:.0f} µs  "
+              f"({speedup:.0f}× speedup)")
 
-        # Countdown (simple loop, target <5 µs per issue)
-        from programs import ALL_TESTS as AT
-        countdown_prog, _ = next(
-            (fn() for name, fn in AT if "countdown" in name.lower()),
-            (None, None)
-        )
-        if countdown_prog:
-            mojo_cd = benchmark_mojo(countdown_prog)
-            print(f"  countdown: Mojo={mojo_cd:.1f} µs  (target: <5 µs)")
+        # Countdown (14 steps, target <5 µs per issue #40)
+        countdown_prog = [
+            Instruction(OP_PUSH, 3), Instruction(OP_DUP),
+            Instruction(OP_PUSH, 1), Instruction(OP_SUB),
+            Instruction(OP_DUP), Instruction(OP_JNZ, 1),
+            Instruction(OP_HALT),
+        ]
+        mojo_cd = benchmark_mojo(countdown_prog)
+        status = "PASS" if mojo_cd < 5.0 else "FAIL"
+        print(f"  countdown(14 steps): Mojo={mojo_cd:.1f} µs  "
+              f"(target: <5 µs) [{status}]")
 
     print()
     print(f"Overall: {total_passed}/{total_tests} passed")
