@@ -90,18 +90,25 @@
 ### isa.py
 > Imports: `torch, typing, dataclasses`
 - **program** (f) `(*instrs)` :37
-- **CompiledAttentionHead** (C) :430
-  - **__init__** (m) `(self, d_model=D_MODEL, head_dim=2, v_dim=1, use_bias_q=False)` :444
-  - **forward** (m) `(self, query_emb, memory_embs)` :451
-- **embed_program_token** (f) `(pos, instr)` :479
-- **embed_stack_entry** (f) `(addr, value, write_order)` :494
-- **embed_local_entry** (f) `(local_idx, value, write_order)` :505
-- **embed_heap_entry** (f) `(addr, value, write_order)` :516
-- **embed_call_frame** (f) `(depth, ret_addr, saved_sp, locals_base, write_order)` :527
-- **embed_state** (f) `(ip, sp)` :540
-- **compare_traces** (f) `(trace_a, trace_b)` :552
-- **test_algorithm** (f) `(name, prog, expected, np_exec, pt_exec, verbose=False)` :562
-- **test_trap_algorithm** (f) `(name, prog, np_exec, pt_exec, verbose=False)` :591
+- **TokenVocab** (C) :430
+  - **encode** (m) `(self, token)` :506
+  - **decode** (m) `(self, tid)` :548
+  - **compile_embedding** (m) `(self, d_model=None)` :572
+  - **compile_unembedding** (m) `(self, embedding=None, d_model=None)` :628
+  - **opcode_name** (m) `(self, op_code)` :658
+  - **token_name** (m) `(self, tid)` :662
+- **CompiledAttentionHead** (C) :684
+  - **__init__** (m) `(self, d_model=D_MODEL, head_dim=2, v_dim=1, use_bias_q=False)` :698
+  - **forward** (m) `(self, query_emb, memory_embs)` :705
+- **embed_program_token** (f) `(pos, instr)` :733
+- **embed_stack_entry** (f) `(addr, value, write_order)` :748
+- **embed_local_entry** (f) `(local_idx, value, write_order)` :759
+- **embed_heap_entry** (f) `(addr, value, write_order)` :770
+- **embed_call_frame** (f) `(depth, ret_addr, saved_sp, locals_base, write_order)` :781
+- **embed_state** (f) `(ip, sp)` :794
+- **compare_traces** (f) `(trace_a, trace_b)` :806
+- **test_algorithm** (f) `(name, prog, expected, np_exec, pt_exec, verbose=False)` :816
+- **test_trap_algorithm** (f) `(name, prog, np_exec, pt_exec, verbose=False)` :845
 
 ### phase10_digit_decomposition.py
 > Imports: `torch, torch.utils.data, random, time, json`...
