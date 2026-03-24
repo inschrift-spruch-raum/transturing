@@ -1,5 +1,5 @@
 # lac/
-*Files: 34*
+*Files: 35*
 
 ## Files
 
@@ -369,6 +369,21 @@
 - **test_model_summary** (f) `()` :328
 - **test_invariants** (f) `()` :388
 - **main** (f) `()` :456
+
+### phase18_integration_tests.py
+> Imports: `sys, os, time, isa, executor`...
+- **test_bubble_sort_3** (f) `()` :37
+- **test_recursive_fib_with_locals** (f) `()` :111
+- **test_array_sum_via_function** (f) `()` :147
+- **test_memory_stack_via_functions** (f) `()` :198
+- **test_multi_function_max** (f) `()` :243
+- **test_recursive_fib_10** (f) `()` :303
+- **test_integration** (f) `()` :347
+- **test_full_regression** (f) `()` :370
+- **test_step_comparison** (f) `()` :466
+- **test_architecture_summary** (f) `()` :493
+- **test_trace_match** (f) `()` :541
+- **main** (f) `()` :565
 
 ### phase1_hull_cache.py
 > Imports: `time, json`
