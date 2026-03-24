@@ -78,6 +78,7 @@ comptime OP_TRAP = 99
 comptime MASK32 = 0xFFFFFFFF
 comptime EPS    = Float64(1e-10)
 comptime COMPACT_INTERVAL = 128  # Compact every N writes
+comptime DIRECT_LIMIT = 256      # Direct-map fast path for addr < this
 
 
 # ─── Data structures ──────────────────────────────────────────────
@@ -89,12 +90,21 @@ struct MemSpace:
     var k1s: List[Float64]
     var vals: List[Int]
     var write_count: Int
+    # Direct-mapped fast path: O(1) read for addr < DIRECT_LIMIT
+    var direct: List[Int]       # direct[addr] = latest value
+    var direct_valid: List[Bool] # whether direct[addr] has been written
 
     fn __init__(out self, capacity: Int = 0):
         self.k0s = List[Float64]()
         self.k1s = List[Float64]()
         self.vals = List[Int]()
         self.write_count = 0
+        self.direct = List[Int]()
+        self.direct_valid = List[Bool]()
+        # Pre-fill direct-map slots
+        for _ in range(DIRECT_LIMIT):
+            self.direct.append(0)
+            self.direct_valid.append(False)
         if capacity > 0:
             self.k0s.reserve(capacity)
             self.k1s.reserve(capacity)
@@ -168,6 +178,10 @@ fn mem_write(mut ms: MemSpace, addr: Int, val: Int):
     ms.k1s.append(-(a * a) + EPS * Float64(ms.write_count))
     ms.vals.append(val)
     ms.write_count += 1
+    # Update direct-map fast path
+    if addr >= 0 and addr < DIRECT_LIMIT:
+        ms.direct[addr] = val
+        ms.direct_valid[addr] = True
 
 
 @always_inline
@@ -182,6 +196,9 @@ comptime SIMD_W = 4  # SIMD width for dot-product scan
 
 @always_inline
 fn mem_read(ms: MemSpace, addr: Int) -> Int:
+    # Direct-map fast path: O(1) for small addresses
+    if addr >= 0 and addr < DIRECT_LIMIT and ms.direct_valid[addr]:
+        return ms.direct[addr]
     var n = len(ms.k0s)
     if n == 0:
         return 0
