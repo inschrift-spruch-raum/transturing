@@ -1,5 +1,5 @@
 # lac/
-*Files: 40 | Subdirectories: 1*
+*Files: 41 | Subdirectories: 1*
 
 ## Subdirectories
 
@@ -73,6 +73,32 @@
 ### assembler.py
 > Imports: `isa`
 - **compile_structured** (f) `(wasm_instrs)` :52
+
+### c_pipeline.py
+> Imports: `os, re, shutil, subprocess, tempfile`...
+- **compile_c_to_wat** (f) `(
+    source: str,
+    *,
+    opt_level: str = '-O1',
+    extra_clang_args: Optional[List[str]] = None,
+)` :168
+- **compile_c** (f) `(
+    source: str,
+    *,
+    func_name: Optional[str] = None,
+    opt_level: str = '-O1',
+    extra_clang_args: Optional[List[str]] = None,
+    strict: bool = True,
+)` :253
+- **compile_and_run** (f) `(
+    source: str,
+    args: List[int],
+    *,
+    func_name: Optional[str] = None,
+    opt_level: str = '-O1',
+    max_steps: int = 50000,
+)` :395
+- **main** (f) `()` :433
 
 ### executor.py
 > Imports: `torch, isa`
