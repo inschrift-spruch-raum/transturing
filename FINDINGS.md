@@ -576,6 +576,44 @@ Adding SWAP/OVER/ROT transforms the ISA from "theoretically Turing-complete but 
 
 4. **The result is a real computer.** Phase 13's compiled transformer is not a toy — it's a Forth-equivalent stack machine that correctly executes Fibonacci, multiplication, and arbitrary algorithms. 964 parameters, 5 attention heads, 12 opcodes, O(log t) per step.
 
+## Tier 3: Type System and Float Scope (Issue #37)
+
+### i32 Masking — What Changed
+
+In Tier 3 Chunk 2, all arithmetic opcodes (ADD, SUB, MUL, DIV, REM, NEG) now apply WASM-standard i32 overflow semantics: `result = result & 0xFFFFFFFF`. Previously bitwise ops (AND/OR/XOR/SHL/SHR/ROTL/ROTR/CLZ/CTZ/POPCNT) were already masked; arithmetic ops operated on unbounded Python ints.
+
+**Key invariant:** `PUSH 0xFFFFFFFF; PUSH 1; ADD` → `0` (wraps around, not `0x100000000`).
+
+The masking is a single line per op group in FF dispatch (both NumPyExecutor and CompiledModel). All existing programs use small values that don't overflow, so their results are unchanged.
+
+### Why Integer-Only Is the Right Scope Boundary
+
+The executor is integer-only by design. This is not a limitation — it's an appropriate scope boundary for what is being proved:
+
+**The architectural claim is about attention and feed-forward primitives, not about floating-point arithmetic.** Parabolic attention indexing, cumulative-sum state tracking, and compiled FF dispatch work identically regardless of whether the values flowing through them are integers or floats. The *mechanism* doesn't care; the *compilation* does.
+
+**Float ops require non-linear FF weights.** Integer ADD is linear: `top = a + b`. Float multiply, divide, sqrt — these are not representable as linear functions of the inputs. Compiling them analytically into weight matrices requires either:
+
+1. **Hybrid path**: Float ops use an external code path (a Python function), not the attention mechanism. This is pragmatic and architecturally valid but breaks the "everything is attention" purity.
+2. **Digit decomposition**: Decompose float ops into sequences of integer micro-ops. Phase 10 explored this for addition — it works but multiplies the step count by N_digits (5–10×). For multiply or sqrt, the explosion is worse.
+3. **Lookup table attention**: Precompute results for quantized inputs; use attention to retrieve nearest match. Lossy, and the quantization grid must be baked in at compile time.
+4. **Learned FF layers**: Train FF layers to approximate float ops. Phase 8 showed that even integer addition is unlearnable in a multi-task context. Float ops are harder.
+
+**Percepta's blog does not describe their float strategy.** The compiled transformer in this repo faithfully implements what their paper describes for integer execution. Float support would require architectural choices not constrained by their approach.
+
+**The scope conclusion:** Document integer-only as a deliberate boundary, not a bug. Real WASM float programs need one of the hybrid strategies above. For the purpose of proving that transformers can implement a general-purpose stack computer, integer ISA is sufficient — it supports Fibonacci, factorial, GCD, parity, multiplication, and arbitrary control flow.
+
+### Float Ops: If Needed, How To Add Them
+
+If a future phase needs float support, the recommended path is the **hybrid approach** (option a above):
+
+- Identify float opcodes (e.g., `OP_F32_ADD`, `OP_F64_MUL`) at FF dispatch time
+- Execute them via Python `float()` arithmetic outside the attention path
+- Write the result into the stack embedding as a regular value
+- The attention mechanism is unchanged — it indexes by position, not by value type
+
+This preserves the parabolic addressing and compiled-weight architecture for all other ops. Float ops become "escape hatches" through the executor, just as division-by-zero already exits via `OP_TRAP`.
+
 ## Files
 - phase1_hull_cache.py — Hull cache benchmarks
 - phase2_parabolic.py — Precision tests
