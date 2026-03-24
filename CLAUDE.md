@@ -174,30 +174,32 @@ Phase 13 proves the compiled transformer is a general-purpose stack computer, no
 
 ### File Reading Discipline
 
-**Start with `_MAP.md` files.** Before diving into any directory's code, check for a `_MAP.md` file in that directory. These map files provide a structured overview of the directory's contents, purpose, and key entry points. Read them first to orient yourself before reading source files. The exception: when you already know exactly what you need and are using `_MAP.md` for a pinpoint lookup (e.g., "which file has the ROT opcode?"), a sub-agent or targeted search is fine.
+**Start with `_MAP.md`.** Always read `_MAP.md` before reading source files. It shows every class, function, and method with signatures and line numbers. Use it to plan targeted reads instead of guessing at file contents.
 
-**Read entire files directly — no chunking, no sub-agents.** The main agent should read files in full. Do not chunk reads, and do not delegate file reading to sub-agents. This repo's files fit comfortably in context; there is no need to economize. Sub-agents lose the main conversation's context and produce worse results for file comprehension.
+**The Read tool has a 10,000 token limit per call.** Several files in this repo exceed that (executor.py is ~11,500 tokens). Do NOT attempt to read large files in full — it will fail. Instead:
 
-1. Read the ENTIRE file in one shot (or in 2-3 large chunks for files >500 lines)
-2. THEN think about what you've read
-3. THEN act
+1. Read `_MAP.md` (always fits, shows the whole repo structure)
+2. Identify the specific classes/functions you need by line number
+3. Read only those line ranges: e.g., `executor.py` lines 43-312 for `NumPyExecutor`, lines 313-568 for `CompiledModel`
 
-**Anti-pattern** (wastes 4 tool calls and 3 thinking rounds):
+**Pattern — map-then-target:**
 ```
-Read phase13 lines 1-150 → think → Read phase13 lines 150-250 → think → Read phase13 lines 250-350 → think → "Now I have the full picture"
-```
-
-**Anti-pattern** (loses context):
-```
-Spawn sub-agent to "read and summarize phase13" → get back a summary → work from summary instead of source
+Read _MAP.md → identify NumPyExecutor.execute at :49 → Read executor.py lines 43-312
 ```
 
-**Correct** (1 tool call, main agent):
+**Anti-pattern — blind chunking:**
 ```
-Read phase13 (entire file) → "Now I have the full picture"
+Read executor.py (fails: 11562 tokens) → Read executor.py offset=0 limit=5000 → Read executor.py offset=5000 limit=5000 → lose track of what's where
 ```
 
-When multiple files need reading, batch them into a single tool call where possible. The goal is to front-load context acquisition and minimize round-trips between reading and doing.
+**Anti-pattern — line-by-line reads:**
+```
+Read executor.py lines 1-100 → think → Read lines 100-200 → think → (repeat 6 more times)
+```
+
+The map tells you exactly where everything is. Use it. One map read + one targeted read beats five exploratory reads.
+
+For files under 10K tokens (most phase files, programs.py, isa.py, test_consolidated.py), reading the full file in one shot is fine and preferred.
 
 ### Environment Setup
 
