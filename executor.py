@@ -58,7 +58,7 @@ class NumPyExecutor:
     Flattened from Phase14Executor <- Phase13Executor <- ExtendedExecutor <- CompiledExecutorNumpy.
     """
 
-    def execute(self, prog, max_steps=5000):
+    def execute(self, prog, max_steps=50000):
         trace = Trace(program=prog)
 
         stack_keys = []
@@ -888,7 +888,7 @@ class TorchExecutor:
         self.model = model or CompiledModel()
         self.model.eval()
 
-    def execute(self, prog, max_steps=5000):
+    def execute(self, prog, max_steps=50000):
         trace = Trace(program=prog)
 
         prog_embs = torch.stack([

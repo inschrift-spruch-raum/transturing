@@ -3,12 +3,18 @@
 Stage 1 (issue #40): Naive structural translation — no SIMD, no pre-allocation.
 Correctness first; optimization is Stage 2.
 
-I/O contract:
+I/O contract (normal mode):
   Input:  program as space-separated "op arg op arg ..." via argv or stdin
   Output: one "op arg sp top" line per step, then "RESULT: <top>"
+
+Timing mode (--repeat N):
+  Runs the program N times silently, reports median execution time.
+  Output: "TIMING_NS: <median_ns>"  (no trace lines)
+  Used by the benchmark harness to measure µs/step without subprocess overhead.
 """
 
 from std.sys import argv
+from std.time import perf_counter_ns
 
 # ─── Opcode constants ─────────────────────────────────────────────
 
@@ -262,8 +268,12 @@ def sign_extend_16(val: Int) -> Int:
 
 # ─── Main executor ───────────────────────────────────────────────
 
-def execute(prog_ops: List[Int], prog_args: List[Int]) raises -> Int:
-    """Execute program; print trace lines; return final top-of-stack."""
+def execute(prog_ops: List[Int], prog_args: List[Int], verbose: Bool = True) raises -> Int:
+    """Execute program; optionally print trace; return final top-of-stack.
+
+    verbose=True  → emit one "op arg sp top" line per step (normal mode)
+    verbose=False → silent execution for timing loops
+    """
 
     var stack_keys  = List[KV]()
     var locals_keys = List[KV]()
@@ -279,7 +289,7 @@ def execute(prog_ops: List[Int], prog_args: List[Int]) raises -> Int:
     var sp = 0
 
     var prog_len = len(prog_ops)
-    var max_steps = 5000
+    var max_steps = 50000
 
     for _step in range(max_steps):
         if ip >= prog_len:
@@ -336,7 +346,8 @@ def execute(prog_ops: List[Int], prog_args: List[Int]) raises -> Int:
 
         elif op == OP_HALT:
             top = mem_read(stack_keys, sp) if sp > 0 else 0
-            print(op, arg, sp, top)
+            if verbose:
+                print(op, arg, sp, top)
             return top
 
         # ── Arithmetic ───────────────────────────────────────────
@@ -367,7 +378,8 @@ def execute(prog_ops: List[Int], prog_args: List[Int]) raises -> Int:
         elif op == OP_DIV_S or op == OP_DIV_U:
             var va = mem_read(stack_keys, sp)
             if va == 0:
-                print(OP_TRAP, 0, sp, 0)
+                if verbose:
+                    print(OP_TRAP, 0, sp, 0)
                 return 0
             var vb = mem_read(stack_keys, sp - 1)
             var res = mask32(trunc_div(vb, va))
@@ -378,7 +390,8 @@ def execute(prog_ops: List[Int], prog_args: List[Int]) raises -> Int:
         elif op == OP_REM_S or op == OP_REM_U:
             var va = mem_read(stack_keys, sp)
             if va == 0:
-                print(OP_TRAP, 0, sp, 0)
+                if verbose:
+                    print(OP_TRAP, 0, sp, 0)
                 return 0
             var vb = mem_read(stack_keys, sp - 1)
             var res = mask32(trunc_rem(vb, va))
@@ -628,7 +641,8 @@ def execute(prog_ops: List[Int], prog_args: List[Int]) raises -> Int:
 
         elif op == OP_RETURN:
             if len(call_stack) == 0:
-                print(OP_TRAP, 0, sp, 0)
+                if verbose:
+                    print(OP_TRAP, 0, sp, 0)
                 return 0
             var ret_val = mem_read(stack_keys, sp)
             var frame   = call_stack.pop()
@@ -657,10 +671,24 @@ def execute(prog_ops: List[Int], prog_args: List[Int]) raises -> Int:
             # Unknown opcode — treat as NOP (matches NumPyExecutor)
             top = mem_read(stack_keys, sp) if sp > 0 else 0
 
-        print(op, arg, sp, top)
+        if verbose:
+            print(op, arg, sp, top)
         ip = next_ip
 
     return mem_read(stack_keys, sp) if sp > 0 else 0
+
+
+# ─── Helpers ─────────────────────────────────────────────────────
+
+def sort_list(mut lst: List[Int]):
+    """In-place insertion sort for timing samples (small N)."""
+    for i in range(1, len(lst)):
+        var key = lst[i]
+        var j = i - 1
+        while j >= 0 and lst[j] > key:
+            lst[j + 1] = lst[j]
+            j -= 1
+        lst[j + 1] = key
 
 
 # ─── Entry point ─────────────────────────────────────────────────
@@ -668,11 +696,19 @@ def execute(prog_ops: List[Int], prog_args: List[Int]) raises -> Int:
 def main() raises:
     var args = argv()
 
+    # Check for --repeat N flag (timing mode)
+    var repeat = 0
+    var arg_start = 1
+    if len(args) > 2 and args[1] == "--repeat":
+        repeat = atol(args[2])
+        arg_start = 3
+
+    # Build program string from remaining args or stdin
     var prog_str: String
-    if len(args) > 1:
+    if len(args) > arg_start:
         prog_str = String()
-        for i in range(1, len(args)):
-            if i > 1:
+        for i in range(arg_start, len(args)):
+            if i > arg_start:
                 prog_str += " "
             prog_str += args[i]
     else:
@@ -682,7 +718,6 @@ def main() raises:
     var tokens = prog_str.split(" ")
     var prog_ops  = List[Int]()
     var prog_args = List[Int]()
-
     var i = 0
     while i < len(tokens):
         var tok = tokens[i]
@@ -698,5 +733,17 @@ def main() raises:
         prog_ops.append(op)
         prog_args.append(arg)
 
-    var result = execute(prog_ops, prog_args)
-    print("RESULT:", result)
+    if repeat > 0:
+        # ── Timing mode: run N times silently, report median ns ──
+        var samples = List[Int]()
+        for _ in range(repeat):
+            var t0 = Int(perf_counter_ns())
+            var _ = execute(prog_ops, prog_args, verbose=False)
+            samples.append(Int(perf_counter_ns()) - t0)
+        sort_list(samples)
+        var median = samples[repeat // 2]
+        print("TIMING_NS:", median)
+    else:
+        # ── Normal mode: print trace + result ──
+        var result = execute(prog_ops, prog_args, verbose=True)
+        print("RESULT:", result)
