@@ -1,5 +1,5 @@
 # lac/
-*Files: 35*
+*Files: 37*
 
 ## Files
 
@@ -64,6 +64,10 @@
 - Where Does Architectural Review by AI Lead? `h2` :58
 - The Bigger Question `h2` :72
 - What We're Left With `h2` :92
+
+### assembler.py
+> Imports: `isa`
+- **compile_structured** (f) `(wasm_instrs)` :52
 
 ### executor.py
 > Imports: `torch, isa`
@@ -384,6 +388,25 @@
 - **test_architecture_summary** (f) `()` :493
 - **test_trace_match** (f) `()` :541
 - **main** (f) `()` :565
+
+### phase19_structured_assembler.py
+> Imports: `sys, os, isa, executor, assembler`
+- **prog_block_early_exit** (f) `()` :39
+- **prog_loop_countdown** (f) `()` :57
+- **prog_if_no_else_taken** (f) `()` :79
+- **prog_if_no_else_skipped** (f) `()` :97
+- **prog_if_else_true** (f) `()` :118
+- **prog_if_else_false** (f) `()` :137
+- **prog_br_table_switch** (f) `()` :156
+- **prog_br_table_default** (f) `()` :199
+- **prog_factorial** (f) `()` :230
+- **prog_gcd** (f) `()` :270
+- **test_structured_programs** (f) `(verbose=False)` :329
+- **test_trace_match** (f) `()` :359
+- **test_br_table_invariant** (f) `()` :384
+- **test_output_types** (f) `()` :449
+- **test_regression** (f) `()` :471
+- **main** (f) `()` :502
 
 ### phase1_hull_cache.py
 > Imports: `time, json`
