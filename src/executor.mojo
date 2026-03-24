@@ -1,7 +1,13 @@
 """Mojo port of NumPyExecutor: full 55-opcode stack machine.
 
-Stage 1 (issue #40): Naive structural translation — no SIMD, no pre-allocation.
-Correctness first; optimization is Stage 2.
+Stage 1 (issue #40): Naive structural translation.
+Stage 2 (issue #43): Performance optimizations:
+  1. @always_inline on all hot functions (mem_read/write, math helpers)
+  2. Pre-allocated List capacity based on program size
+  3. SoA (Struct-of-Arrays) memory layout for cache-friendly scans
+  4. Write compaction: periodic dedup keeps only latest write per address
+  5. SIMD[float64, 4] dot-product in parabolic argmax scan
+  6. Direct-mapped O(1) fast path for addresses < 256
 
 I/O contract (normal mode):
   Input:  program as space-separated "op arg op arg ..." via argv or stdin
