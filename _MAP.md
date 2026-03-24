@@ -1,5 +1,5 @@
 # lac/
-*Files: 38 | Subdirectories: 1*
+*Files: 40 | Subdirectories: 1*
 
 ## Subdirectories
 
@@ -91,12 +91,14 @@
 > Imports: `torch, typing, dataclasses`
 - **program** (f) `(*instrs)` :37
 - **TokenVocab** (C) :430
+  - **__init__** (m) `(self)` :489
   - **encode** (m) `(self, token)` :506
   - **decode** (m) `(self, tid)` :548
   - **compile_embedding** (m) `(self, d_model=None)` :572
   - **compile_unembedding** (m) `(self, embedding=None, d_model=None)` :628
   - **opcode_name** (m) `(self, op_code)` :658
   - **token_name** (m) `(self, tid)` :662
+  - **__repr__** (m) `(self)` :675
 - **CompiledAttentionHead** (C) :684
   - **__init__** (m) `(self, d_model=D_MODEL, head_dim=2, v_dim=1, use_bias_q=False)` :698
   - **forward** (m) `(self, query_emb, memory_embs)` :705
@@ -784,6 +786,15 @@
 - **test_torch_equivalence** (f) `()` :253
 - **test_new_np_vs_new_pt** (f) `()` :356
 - **main** (f) `()` :431
+
+### test_wat_parser.py
+> Imports: `sys, wat_parser, isa, executor, programs`
+- **run_and_compare** (f) `(name, wat_text, expected_top, *, tuple_prog=None, verbose=False)` :16
+- **main** (f) `()` :358
+
+### wat_parser.py
+> Imports: `re, typing, isa, assembler`
+- **parse_wat** (f) `(text: str, *, append_halt: bool = True)` :508
 
 ## Other Files
 
