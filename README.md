@@ -1,115 +1,147 @@
 # llm-as-computer
 
-Testing [Percepta's claim](https://percepta.ai/blog/can-llms-be-computers) that transformers can execute programs internally via 2D convex hull attention, achieving O(log t) per-step decoding over million-step execution traces.
+A compiled transformer executor that runs programs inside a transformer's own inference loop. Each instruction fetch and memory read is a parabolic attention head — no external interpreter, no tool use. The transformer *is* the computer.
 
-**Writeup:** [WRITEUP.md](WRITEUP.md)
+Built to independently validate [Percepta's claim](https://percepta.ai/blog/can-llms-be-computers) that transformers can execute arbitrary programs via 2D convex hull attention with O(log t) per-step decoding.
 
-## What is this?
+## Blog Posts
 
-Percepta published a blog post (Mar 11, 2026) describing how they embedded a WebAssembly interpreter inside a vanilla transformer by:
+- **[Yes, LLMs Can Be Computers. Now What?](https://muninn.austegard.com/blog/yes-llms-can-be-computers-now-what)** — Full narrative of the 13-phase validation, including a productive wrong turn through training.
+- **[The Free Computer: Why Offloading to CPU Is a Win for Everyone](https://muninn.austegard.com/blog/the-free-computer-why-offloading-to-cpu-is-a-win-for-everyone)** — The economic argument for compiled CPU execution.
 
-1. Restricting attention head dimension to 2D
-2. Using parabolic key encoding k_j = (2j, −j²) for memory lookups
-3. Replacing linear attention scans with convex hull queries for O(log t) decoding
-4. Tracking state (instruction pointer, stack depth) via cumulative sum attention
+## Benchmark Results
 
-They released no code or weights. This repo independently tests whether the core primitives work as described — and ultimately validates the approach by building a working compiled transformer executor.
+Million-step benchmarks validating the executor at scale: [Issue #52](https://github.com/oaustegard/llm-as-computer/issues/52#issuecomment-2752773503). Key numbers: Mojo backend at **67–126M steps/sec**, Python at **2.1–3.1M steps/sec**, 1.2M steps in 17ms (Mojo) or 561ms (Python).
 
-## Status
+## ISA Reference
 
-### Foundation: Validating the Primitives (Phases 1–4)
+The executor implements a 55-opcode stack machine ISA, modeled on WebAssembly's i32 instruction subset. All operations are compiled into transformer weight matrices — the feed-forward layers dispatch opcodes, and attention heads handle memory addressing via parabolic key encoding.
 
-| Phase | Description | Status | Key Finding |
-|-------|------------|--------|-------------|
-| 1 | Convex hull KV cache scaling | Done | O(log t) confirmed via ternary search. 35x speedup at 50K steps. |
-| 2 | Parabolic key encoding precision | Done | Float32 breaks at index ~4K (revised). Float64 safe to ~200K+. |
-| 2b | Extended addressing | Done | Residual (bit-split) addressing: 25M range from 2 heads. |
-| 3 | Cumulative sum via attention | Done | Rock-solid — zero integer errors at 100K in float32. |
-| 4 | Hand-wired stack machine | Done | Primitives compose. 10/10 test programs execute correctly via attention only. |
+### Stack Operations
 
-### Detour: Can Gradient Descent Learn Execution? (Phases 5–9)
+| Opcode | Name | Description | Computing context |
+|--------|------|-------------|-------------------|
+| 1 | PUSH *n* | Push immediate value *n* onto stack | Loading constants and literals |
+| 2 | POP | Discard top of stack | Cleaning up temporary values |
+| 4 | DUP | Duplicate top of stack | Reusing a value without recomputing it |
+| 10 | SWAP | Swap top two stack elements | Reordering operands for non-commutative ops |
+| 11 | OVER | Copy second element to top | Accessing a value below top without destructive pop |
+| 12 | ROT | Rotate top three elements (a b c → b c a) | Three-value shuffling, e.g. Fibonacci iteration |
+| 42 | SELECT | Pop three; push b if c≠0, else a | Branchless conditional — like C's ternary `?:` |
 
-Phases 5–9 explored whether a small transformer could *learn* to execute programs from training data alone. This was not a deliberate departure from Percepta's compile approach — it was accidental drift across sessions. Without an extractive summary of Percepta's specific claims pinned to our plan, "let's try training" felt like a natural next step even though the blog post's entire thesis is that compilation, not training, is the answer. The journey was nonetheless instructive — it precisely characterized *why* compilation is necessary.
+### Arithmetic
 
-| Phase | Description | Status | Key Finding |
-|-------|------------|--------|-------------|
-| 5 | Trained micro-executor | Done | Learns execution structure (56% token acc, 112x chance) but 0/50 perfect traces. Width > depth. |
-| 6 | Curriculum learning | Done | 56%→85% acc, 0→39/50 perfect traces. Solves copy bottleneck and non-arithmetic ops. |
-| 7 | Percepta architecture test | Done | Percepta's d=36/h=18/L=7 matches Phase 6 (84.6% acc) but doesn't break the DIFF+ADD wall (0%). |
-| 8 | Micro-op trace diagnostics | Done | **THE key diagnostic phase.** Retrieval is 100% solved; arithmetic (a+b for a≠b) is the sole bottleneck. |
-| 9 | Weighted arithmetic loss | Done | Weighted loss perfects doubling (2a→100%) but true addition (a+b, a≠b) stays at 0%. It's representational, not gradient signal. |
+| Opcode | Name | Description | Computing context |
+|--------|------|-------------|-------------------|
+| 3 | ADD | a + b | Integer addition |
+| 6 | SUB | a − b | Integer subtraction |
+| 13 | MUL | a × b | Integer multiplication |
+| 14 | DIV_S | Signed division (truncated toward zero) | C-style signed `/` |
+| 15 | DIV_U | Unsigned division | Unsigned `/` — treats operands as non-negative |
+| 16 | REM_S | Signed remainder | C-style signed `%` |
+| 17 | REM_U | Unsigned remainder | Unsigned `%` |
+| 40 | ABS | Absolute value | `abs(x)` — flips sign if negative |
+| 41 | NEG | Negate | Unary minus: `0 - x` |
 
-**Conclusion from Phases 5–9:** Training alone cannot learn true integer addition within execution context. The DIFF+ADD wall is a representational limit of FF layers trying to simultaneously learn arithmetic and routing. This sent us back to Percepta's original insight: *compile, don't train.*
+### Comparison
 
-### Back on Track: Compiled Execution (Phases 11–13)
+| Opcode | Name | Description | Computing context |
+|--------|------|-------------|-------------------|
+| 18 | EQZ | Push 1 if top == 0, else 0 | Zero-test for conditionals and loop termination |
+| 19 | EQ | Push 1 if a == b | Equality comparison |
+| 20 | NE | Push 1 if a ≠ b | Inequality comparison |
+| 21 | LT_S | Signed less-than | Signed `<` — respects two's complement sign |
+| 22 | LT_U | Unsigned less-than | Unsigned `<` — treats values as non-negative |
+| 23 | GT_S | Signed greater-than | Signed `>` |
+| 24 | GT_U | Unsigned greater-than | Unsigned `>` |
+| 25 | LE_S | Signed less-or-equal | Signed `<=` |
+| 26 | LE_U | Unsigned less-or-equal | Unsigned `<=` |
+| 27 | GE_S | Signed greater-or-equal | Signed `>=` |
+| 28 | GE_U | Unsigned greater-or-equal | Unsigned `>=` |
 
-Rereading Percepta's blog post clarified the divergence. Percepta **compiles** interpreter logic directly into weight matrices; we had been **training** via gradient descent. Phases 11–13 return to the compile path and validate it completely.
+### Bitwise
 
-| Phase | Description | Status | Key Finding |
-|-------|------------|--------|-------------|
-| 11 | Compiled executor (numpy) | Done | 100% correct traces. Extended ISA with SUB/JZ/JNZ enables loops and control flow. |
-| 12 | Real PyTorch compiled transformer | Done | 100% correct via real nn.Linear weight matrices and tensor ops (matmul, argmax). 758 compiled params. |
-| 13 | ISA completeness | Done | SWAP/OVER/ROT + Fibonacci, multiply, power-of-2, sum, parity. Forth-equivalent ISA. 964 compiled params. |
+| Opcode | Name | Description | Computing context |
+|--------|------|-------------|-------------------|
+| 29 | AND | Bitwise AND | Masking bits, flag testing |
+| 30 | OR | Bitwise OR | Setting bits, combining flags |
+| 31 | XOR | Bitwise exclusive OR | Toggling bits, simple checksums |
+| 32 | SHL | Shift left | Multiply by power of 2, bit packing |
+| 33 | SHR_S | Arithmetic shift right | Signed divide by power of 2 (preserves sign) |
+| 34 | SHR_U | Logical shift right | Unsigned divide by power of 2 |
+| 35 | ROTL | Rotate left | Circular bit rotation — used in hash functions |
+| 36 | ROTR | Rotate right | Circular bit rotation |
+| 37 | CLZ | Count leading zeros | Fast log₂, priority encoding |
+| 38 | CTZ | Count trailing zeros | Finding lowest set bit |
+| 39 | POPCNT | Population count | Counting set bits — Hamming weight |
+
+### Control Flow
+
+| Opcode | Name | Description | Computing context |
+|--------|------|-------------|-------------------|
+| 5 | HALT | Stop execution | Program termination |
+| 7 | JZ *addr* | Jump if top == 0 | Conditional branch — `if (!x) goto addr` |
+| 8 | JNZ *addr* | Jump if top ≠ 0 | Conditional branch — `if (x) goto addr` |
+| 9 | NOP | No operation | Alignment padding, jump targets |
+| 54 | CALL *addr* | Push return address, jump to addr | Function call |
+| 55 | RETURN | Pop return address, jump back | Function return |
+| 99 | TRAP | Illegal operation (runtime error) | Error signaling — division by zero, stack underflow |
+
+### Local Variables
+
+| Opcode | Name | Description | Computing context |
+|--------|------|-------------|-------------------|
+| 43 | LOCAL.GET *i* | Push local variable *i* onto stack | Reading a named variable |
+| 44 | LOCAL.SET *i* | Pop stack into local variable *i* | Writing a named variable |
+| 45 | LOCAL.TEE *i* | Copy top of stack into local *i* (no pop) | Write + keep — avoids DUP before SET |
+
+### Linear Memory
+
+| Opcode | Name | Description | Computing context |
+|--------|------|-------------|-------------------|
+| 46 | I32.LOAD | Load 32-bit value from heap address | Reading from heap memory (arrays, structs) |
+| 47 | I32.STORE | Store 32-bit value to heap address | Writing to heap memory |
+| 48 | I32.LOAD8_U | Load byte, zero-extend to 32 bits | Reading unsigned bytes from memory |
+| 49 | I32.LOAD8_S | Load byte, sign-extend to 32 bits | Reading signed bytes |
+| 50 | I32.LOAD16_U | Load 16-bit value, zero-extend | Reading unsigned shorts |
+| 51 | I32.LOAD16_S | Load 16-bit value, sign-extend | Reading signed shorts |
+| 52 | I32.STORE8 | Truncate to byte and store | Writing bytes to memory |
+| 53 | I32.STORE16 | Truncate to 16 bits and store | Writing shorts to memory |
 
 ## Files
 
-### Core (root)
+### Core
 ```
-isa.py                          # ISA definition: opcodes, dimensions, trace types
-executor.py                     # NumPy + PyTorch compiled transformer executors
-programs.py                     # Test programs and algorithm generators
-assembler.py                    # Structured WASM → flat ISA compiler
-wat_parser.py                   # WebAssembly text format parser
-c_pipeline.py                   # C → WAT → ISA compilation pipeline
-test_consolidated.py            # Integration tests (NumPy/PyTorch equivalence)
-test_wat_parser.py              # WAT parser test suite
-```
-
-### Documentation
-```
-WRITEUP.md                      # Full narrative writeup
-FINDINGS.md                     # Detailed per-phase findings
-RD-PLAN.md                      # R&D plan and evolution
-CLAUDE.md                       # Project instructions for Claude Code
+isa.py                  ISA definition: 55 opcodes, types, embedding layout
+executor.py             NumPy + PyTorch compiled transformer executors
+programs.py             Test programs and algorithm generators
+assembler.py            WASM-style structured control flow → flat ISA compiler
+wat_parser.py           WebAssembly text format parser
+c_pipeline.py           C → WAT → ISA compilation pipeline
+test_consolidated.py    Integration tests (NumPy/PyTorch equivalence)
+test_wat_parser.py      WAT parser test suite
 ```
 
-### Development
+### Mojo Backend (`src/`)
 ```
-dev/phases/                     # Phase exploration scripts (1-20) and result JSON
-src/                            # Mojo implementation experiments
-viz/                            # React visualizations
-```
-
-## Running
-
-```bash
-# Foundation phases
-python3 phase1_hull_cache.py       # ~60s, benchmarks query scaling
-python3 phase2_parabolic.py        # ~10s, finds float32 breakpoint
-python3 phase3_cumsum.py           # ~10s, tests numerical drift
-python3 phase4_stack_machine.py    # ~1s, stack machine composition test
-
-# Training experiments (Phases 5-9, requires torch)
-python3 phase5_training.py         # ~5min+ CPU, trains 3 model configs
-python3 phase6_curriculum.py       # ~2min CPU, 3-stage curriculum
-python3 phase7_percepta_arch.py    # Percepta architecture comparison
-python3 phase8_microop_traces.py   # Micro-op diagnostics
-python3 phase9_weighted_arithmetic.py  # Weighted loss experiments
-
-# Compiled execution (Phases 11-13)
-python3 phase11_compile_executor.py    # ~1s, compiled executor tests
-python3 phase12_percepta_model.py      # ~1s, PyTorch compiled transformer
-python3 phase13_isa_completeness.py    # ~1s, ISA completeness + algorithms
+executor.mojo           Mojo port of the full 55-opcode executor
+benchmark.py            Mojo vs NumPy micro-benchmarks
+benchmarks.py           Substantial benchmark programs (FNV-1a, bubble sort, primes)
+llm_vs_native.py        Honest comparison: LLM-executor vs native Python
+run_mojo_tests.py       Mojo executor test runner
 ```
 
-Requires: numpy, scipy (for convex hull verification), torch (for Phases 5-9 and 12-13).
+### Development (`dev/`)
+```
+phases/                 Phase exploration scripts (1–20) and result JSON
+FINDINGS.md             Detailed per-phase findings
+RD-PLAN.md              Original R&D plan and evolution
+benchmark_scaling.py    Million-step scaling benchmarks (Issue #52)
+```
 
-## Key Takeaways
-
-- **The geometry works.** Parabolic keys + ternary search give exact O(log n) index lookup.
-- **Float32 is the bottleneck — but solvable.** ~4K addressable indices per parabolic head. Residual (bit-split) addressing with 2 heads extends this to 25M.
-- **Cumsum is not the weak link.** Both the mean×t trick and sequential lookback are stable far beyond expected.
-- **The primitives compose.** Phase 4 proves parabolic indexing, recency bias, and sequential state tracking work together as a stack machine executor.
-- **Training alone hits a wall.** Phases 5–9 showed that gradient descent can learn execution *structure* (85% accuracy, 39/50 perfect traces) but cannot learn true integer addition (a+b for a≠b) within execution context. The bottleneck is representational, not capacity or gradient signal.
-- **Compile, don't train.** Returning to Percepta's original approach in Phases 11–13 validates their core claim: when arithmetic and routing logic are compiled directly into weight matrices, the transformer executes correctly — including true addition, subtraction, branching, and loops.
-- **The result is a general-purpose stack computer.** Phase 13's 12-opcode, 5-head, 964-parameter compiled transformer is Forth-equivalent, executing Fibonacci, multiplication, power-of-2, summation, and parity checks correctly.
+### Other
+```
+WRITEUP.md              → Links to published blog posts
+CLAUDE.md               Project instructions for Claude Code
+viz/                    React visualizations
+```
