@@ -53,25 +53,31 @@ Rereading Percepta's blog post clarified the divergence. Percepta **compiles** i
 
 ## Files
 
+### Core (root)
 ```
-CLAUDE.md                       # Project instructions and full phase history
+isa.py                          # ISA definition: opcodes, dimensions, trace types
+executor.py                     # NumPy + PyTorch compiled transformer executors
+programs.py                     # Test programs and algorithm generators
+assembler.py                    # Structured WASM → flat ISA compiler
+wat_parser.py                   # WebAssembly text format parser
+c_pipeline.py                   # C → WAT → ISA compilation pipeline
+test_consolidated.py            # Integration tests (NumPy/PyTorch equivalence)
+test_wat_parser.py              # WAT parser test suite
+```
+
+### Documentation
+```
+WRITEUP.md                      # Full narrative writeup
+FINDINGS.md                     # Detailed per-phase findings
 RD-PLAN.md                      # R&D plan and evolution
-FINDINGS.md                     # Detailed findings from all phases
-phase1_hull_cache.py            # Convex hull vs brute force benchmarks
-phase2_parabolic.py             # Parabolic encoding precision tests
-phase2b_address_limits.py       # Extended addressing exploration
-phase3_cumsum.py                # Cumulative sum stability tests
-phase4_stack_machine.py         # Stack machine via attention primitives
-phase5_training.py              # Training experiments (3 model configs)
-phase6_curriculum.py            # Curriculum learning experiment
-phase7_percepta_arch.py         # Percepta architecture (d=36,h=18,L=7) test
-phase8_microop_traces.py        # Micro-op decomposition diagnostics
-phase9_weighted_arithmetic.py   # Weighted loss experiments
-phase10_digit_decomposition.py  # Digit decomposition (exploratory)
-phase11_compile_executor.py     # Compiled executor with numpy primitives
-phase12_percepta_model.py       # Full PyTorch compiled transformer
-phase13_isa_completeness.py     # ISA completeness: SWAP/OVER/ROT + algorithms
-viz/phase1-results.jsx          # Phase 1 interactive visualization (React)
+CLAUDE.md                       # Project instructions for Claude Code
+```
+
+### Development
+```
+dev/phases/                     # Phase exploration scripts (1-20) and result JSON
+src/                            # Mojo implementation experiments
+viz/                            # React visualizations
 ```
 
 ## Running
