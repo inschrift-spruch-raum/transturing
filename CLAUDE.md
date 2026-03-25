@@ -217,6 +217,19 @@ pip install -r requirements.txt --break-system-packages
 
 **Do not pin exact versions.** This is a research repo; loose lower bounds (`>=`) in requirements.txt avoid unnecessary breakage across environments.
 
+### Mojo Availability
+
+**Mojo is available in this repo.** The `llm-as-computer` skill (installed at `/mnt/skills/user/llm-as-computer/`) includes a Mojo executor. The SessionStart hook installs Mojo and compiles the executor binary automatically. To use it:
+
+```python
+import sys
+sys.path.insert(0, '/mnt/skills/user/llm-as-computer/src')
+from runner import run, setup
+setup()  # idempotent — installs Mojo + compiles if needed
+```
+
+If Mojo is not yet installed, run `cd /mnt/skills/user/llm-as-computer/src && bash setup.sh`. The skill falls back to a pure-Python executor if Mojo is unavailable.
+
 ### Container Constraints
 - Claude.ai containers: ~200s bash timeout, ~15 min session limit, 8GB RAM
 - CCotw (Claude Code on the web): 600s bash timeout, longer sessions, 16GB RAM — better for compute
