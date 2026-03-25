@@ -9,6 +9,10 @@ Built to independently validate [Percepta's claim](https://percepta.ai/blog/can-
 - **[Yes, LLMs Can Be Computers. Now What?](https://muninn.austegard.com/blog/yes-llms-can-be-computers-now-what)** — Full narrative of the 13-phase validation, including a productive wrong turn through training.
 - **[The Free Computer: Why Offloading to CPU Is a Win for Everyone](https://muninn.austegard.com/blog/the-free-computer-why-offloading-to-cpu-is-a-win-for-everyone)** — The economic argument for compiled CPU execution.
 
+## How It Works
+
+New to this? **[HOW-IT-WORKS.md](HOW-IT-WORKS.md)** walks through a 4-instruction program step by step, showing why this isn't just a regular interpreter with extra steps. The short version: every memory read is a dot product and an argmax — the same attention mechanism that runs in every transformer.
+
 ## Benchmark Results
 
 Million-step benchmarks validating the executor at scale: [Issue #52](https://github.com/oaustegard/llm-as-computer/issues/52#issuecomment-2752773503). Key numbers: Mojo backend at **67–126M steps/sec**, Python at **2.1–3.1M steps/sec**, 1.2M steps in 17ms (Mojo) or 561ms (Python).
