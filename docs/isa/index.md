@@ -1,37 +1,36 @@
-# llm-as-computer
+# ISA 参考手册
 
-A compiled transformer executor that runs programs inside a transformer's own inference loop. Each instruction fetch and memory read is a parabolic attention head — no external interpreter, no tool use. The transformer *is* the computer.
+55 条指令的完整参考文档。该指令集架构 (ISA) 是一个基于栈的虚拟机，以 WebAssembly 的 i32 指令子集为蓝本。
 
-Built to independently validate [Percepta's claim](https://percepta.ai/blog/can-llms-be-computers) that transformers can execute arbitrary programs via 2D convex hull attention with O(log t) per-step decoding.
+## 概述
 
-## Blog Posts
+这套 ISA 驱动着整个"transformer 即计算机"系统。所有指令都被**编译进 transformer 的权重矩阵**，而不是由外部解释器逐条执行。前馈层负责指令分发，注意力头则通过抛物线键编码 (parabolic key encoding) 完成内存寻址。每一步执行本质上就是一次 dot product 加一次 argmax，跟标准 transformer 推理中的注意力机制完全一致。
 
-- **[Yes, LLMs Can Be Computers. Now What?](https://muninn.austegard.com/blog/yes-llms-can-be-computers-now-what)** — Full narrative of the 13-phase validation, including a productive wrong turn through training.
-- **[The Free Computer: Why Offloading to CPU Is a Win for Everyone](https://muninn.austegard.com/blog/the-free-computer-why-offloading-to-cpu-is-a-win-for-everyone)** — The economic argument for compiled CPU execution.
+### 栈机器架构
 
-## How It Works
+这套 ISA 采用经典的栈机器 (stack machine) 设计。大多数指令从栈顶弹出操作数，计算后将结果压回栈顶。没有寄存器，没有显式的操作数编码。好处是编译器前端实现简单，坏处是指令序列会比寄存器机器更长。
 
-New to this? **[How It Works](docs/guides/how-it-works.md)** walks through a 4-instruction program step by step, showing why this isn't just a regular interpreter with extra steps. The short version: every memory read is a dot product and an argmax — the same attention mechanism that runs in every transformer.
+### 五个内存空间
 
-## Documentation
+指令通过不同的注意力头访问五个独立的内存空间：
 
-Full documentation is in the [docs/](docs/) directory:
+1. **程序内存**：取指令和参数
+2. **栈内存**：读取 SP、SP-1、SP-2 位置的值
+3. **局部变量**：LOCAL.GET / LOCAL.SET / LOCAL.TEE
+4. **堆 / 线性内存**：I32.LOAD / STORE 及字节/短整数变体
+5. **调用帧**：CALL / RETURN 保存返回地址和栈指针
 
-- **[Quick Start](docs/quickstart.md)** — Get running in 5 minutes
-- **[How It Works](docs/guides/how-it-works.md)** — Step-by-step walkthrough of a 4-instruction program
-- **[Architecture](docs/architecture/overview.md)** — System design and key concepts
-- **[ISA Reference](docs/isa/index.md)** — Complete 55-opcode reference
-- **[Development](docs/development/findings-summary.md)** — Research findings and R&D plan
+### 关键语义
 
-## Benchmark Results
+- **i32 溢出处理**：所有算术运算结果执行 `result & 0xFFFFFFFF`，遵循 WebAssembly 标准。例如 `PUSH 0xFFFFFFFF; PUSH 1; ADD` 结果为 `0`。
+- **TRAP 运行时错误**：除以零、栈下溢等错误不会抛出 Python 异常，而是发出 OP_TRAP（操作码 99）。
+- **有符号/无符号区分**：i32 的 32 位值可以同时表示有符号和无符号数。DIV_S / REM_S 按二进制补码解释，DIV_U / REM_U 将操作数视为非负整数。
 
-Million-step benchmarks validating the executor at scale: [Issue #52](https://github.com/oaustegard/llm-as-computer/issues/52#issuecomment-2752773503). Key numbers: Mojo backend at **67–126M steps/sec**, Python at **2.1–3.1M steps/sec**, 1.2M steps in 17ms (Mojo) or 561ms (Python).
+## 指令表
 
-## ISA Reference
+以下 7 个分类覆盖全部 55 条指令。
 
-The executor implements a 55-opcode stack machine ISA, modeled on WebAssembly's i32 instruction subset. All operations are compiled into transformer weight matrices — the feed-forward layers dispatch opcodes, and attention heads handle memory addressing via parabolic key encoding.
-
-### Stack Operations
+### 1. Stack Operations
 
 | Opcode | Name | Description | Computing context |
 |--------|------|-------------|-------------------|
@@ -43,7 +42,7 @@ The executor implements a 55-opcode stack machine ISA, modeled on WebAssembly's 
 | 12 | ROT | Rotate top three elements (a b c → b c a) | Three-value shuffling, e.g. Fibonacci iteration |
 | 42 | SELECT | Pop three; push b if c≠0, else a | Branchless conditional — like C's ternary `?:` |
 
-### Arithmetic
+### 2. Arithmetic
 
 | Opcode | Name | Description | Computing context |
 |--------|------|-------------|-------------------|
@@ -57,7 +56,7 @@ The executor implements a 55-opcode stack machine ISA, modeled on WebAssembly's 
 | 40 | ABS | Absolute value | `abs(x)` — flips sign if negative |
 | 41 | NEG | Negate | Unary minus: `0 - x` |
 
-### Comparison
+### 3. Comparison
 
 | Opcode | Name | Description | Computing context |
 |--------|------|-------------|-------------------|
@@ -73,7 +72,7 @@ The executor implements a 55-opcode stack machine ISA, modeled on WebAssembly's 
 | 27 | GE_S | Signed greater-or-equal | Signed `>=` |
 | 28 | GE_U | Unsigned greater-or-equal | Unsigned `>=` |
 
-### Bitwise
+### 4. Bitwise
 
 | Opcode | Name | Description | Computing context |
 |--------|------|-------------|-------------------|
@@ -89,7 +88,7 @@ The executor implements a 55-opcode stack machine ISA, modeled on WebAssembly's 
 | 38 | CTZ | Count trailing zeros | Finding lowest set bit |
 | 39 | POPCNT | Population count | Counting set bits — Hamming weight |
 
-### Control Flow
+### 5. Control Flow
 
 | Opcode | Name | Description | Computing context |
 |--------|------|-------------|-------------------|
@@ -101,7 +100,7 @@ The executor implements a 55-opcode stack machine ISA, modeled on WebAssembly's 
 | 55 | RETURN | Pop return address, jump back | Function return |
 | 99 | TRAP | Illegal operation (runtime error) | Error signaling — division by zero, stack underflow |
 
-### Local Variables
+### 6. Local Variables
 
 | Opcode | Name | Description | Computing context |
 |--------|------|-------------|-------------------|
@@ -109,7 +108,7 @@ The executor implements a 55-opcode stack machine ISA, modeled on WebAssembly's 
 | 44 | LOCAL.SET *i* | Pop stack into local variable *i* | Writing a named variable |
 | 45 | LOCAL.TEE *i* | Copy top of stack into local *i* (no pop) | Write + keep — avoids DUP before SET |
 
-### Linear Memory
+### 7. Linear Memory
 
 | Opcode | Name | Description | Computing context |
 |--------|------|-------------|-------------------|
@@ -122,40 +121,7 @@ The executor implements a 55-opcode stack machine ISA, modeled on WebAssembly's 
 | 52 | I32.STORE8 | Truncate to byte and store | Writing bytes to memory |
 | 53 | I32.STORE16 | Truncate to 16 bits and store | Writing shorts to memory |
 
-## Files
+## 相关文档
 
-### Core
-```
-isa.py                  ISA definition: 55 opcodes, types, embedding layout
-executor.py             NumPy + PyTorch compiled transformer executors
-programs.py             Test programs and algorithm generators
-assembler.py            WASM-style structured control flow → flat ISA compiler
-wat_parser.py           WebAssembly text format parser
-c_pipeline.py           C → WAT → ISA compilation pipeline
-test_consolidated.py    Integration tests (NumPy/PyTorch equivalence)
-test_wat_parser.py      WAT parser test suite
-```
-
-### Mojo Backend (`src/`)
-```
-executor.mojo           Mojo port of the full 55-opcode executor
-benchmark.py            Mojo vs NumPy micro-benchmarks
-benchmarks.py           Substantial benchmark programs (FNV-1a, bubble sort, primes)
-llm_vs_native.py        Honest comparison: LLM-executor vs native Python
-run_mojo_tests.py       Mojo executor test runner
-```
-
-### Development (`dev/`)
-```
-phases/                 Phase exploration scripts (1–20) and result JSON
-FINDINGS.md             Detailed per-phase findings
-RD-PLAN.md              Original R&D plan and evolution
-benchmark_scaling.py    Million-step scaling benchmarks (Issue #52)
-```
-
-### Other
-```
-docs/                   Full documentation (quickstart, architecture, ISA ref)
-AGENTS.md               Project instructions for OpenCode
-viz/                    React visualizations
-```
+- [opcodes.md](opcodes.md) — 各指令的详细说明与使用示例
+- [../architecture/overview.md](../architecture/overview.md) — 系统架构与核心概念

@@ -6,7 +6,6 @@ Mojo port of the 55-opcode compiled executor, plus benchmarks comparing Mojo vs 
 
 ```
 src/
-├── _MAP.md              # Code map for this directory
 ├── executor.mojo        # Mojo port of full 55-opcode executor
 ├── percepta_exec        # Compiled Mojo binary (gitignored)
 ├── .gitignore           # Ignores percepta_exec

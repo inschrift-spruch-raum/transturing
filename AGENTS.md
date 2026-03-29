@@ -18,11 +18,16 @@ Compiled transformer executor — programs run inside a transformer's own infere
 ├── c_pipeline.py       # C → WAT → ISA compilation (requires clang + wasm2wat)
 ├── test_consolidated.py    # Integration tests (NumPy/PyTorch equivalence)
 ├── test_wat_parser.py      # WAT parser test suite
-├── _MAP.md             # Repo-wide code map (READ THIS FIRST)
 ├── dev/
 │   ├── phases/         # 20 phase exploration scripts (1–20) + result JSONs
 │   ├── FINDINGS.md     # Detailed per-phase findings
 │   └── RD-PLAN.md      # R&D plan with status
+├── docs/
+│   ├── architecture/   # overview.md, memory-model.md, compilation.md
+│   ├── isa/            # index.md, opcodes.md
+│   ├── guides/         # how-it-works.md, writing-programs.md
+│   ├── development/    # findings-summary.md, rd-plan-summary.md
+│   └── reference/      # api.md, file-map.md
 ├── src/                # Mojo backend (executor.mojo + benchmarks)
 ├── examples/           # Hungarian algorithm, Sudoku solver
 └── viz/                # React visualizations
@@ -40,6 +45,7 @@ Compiled transformer executor — programs run inside a transformer's own infere
 | Parse WAT text | `wat_parser.py` | 712 lines, handles full WAT syntax |
 | Run benchmarks | `dev/benchmark_scaling.py` or `src/benchmarks.py` | Mojo vs Python |
 | Find phase findings | `dev/FINDINGS.md` | Comprehensive per-phase analysis |
+| Read documentation | `docs/` | Start with `docs/quickstart.md` or `docs/guides/how-it-works.md` |
 
 ## ARCHITECTURE
 
@@ -91,7 +97,7 @@ Compiled transformer executor — programs run inside a transformer's own infere
 - **NEVER use float32 for compiled models** — Float64 mandatory for parabolic addressing correctness. Score values scale as `addr²`; float32 limit ~4K indices.
 - **NEVER suppress type errors** — No `as any`, `@ts-ignore`, `# type: ignore`.
 - **NEVER batch file changes** — Commit and push after EVERY write. Sessions die without warning.
-- **NEVER read large files blind** — Use `_MAP.md` first, then targeted line-range reads. `executor.py` (~1070 lines) is the main trap.
+- **NEVER read large files blind** — Use `docs/reference/api.md` as function index, then targeted line-range reads. `executor.py` (~1070 lines) is the main trap.
 - **Do NOT pin exact dependency versions** — Research repo; use `>=` lower bounds.
 - **Do NOT add `__init__.py`** — Flat module structure by design. No packages.
 
@@ -101,7 +107,7 @@ Compiled transformer executor — programs run inside a transformer's own infere
 - **Dual-executor validation** — Every test must verify NumPyExecutor AND TorchExecutor produce identical traces via `compare_traces()`.
 - **i32 overflow semantics** — All arithmetic applies `result & 0xFFFFFFFF` (WASM standard). `PUSH 0xFFFFFFFF; PUSH 1; ADD` → `0`.
 - **TRAP for runtime errors** — Division by zero, stack underflow emit OP_TRAP (opcode 99), not Python exceptions.
-- **Phase files are standalone** — Each `phaseN_*.py` is self-contained with its own test harness. Run directly with `python dev/phases/phaseN_*.py`.
+- **Phase files are standalone** — Each `phaseN_*.py` is self-contained with its own test harness. Run directly with `uv run dev/phases/phaseN_*.py`.
 - **Self-referencing EPS values** — NumPy executors use `eps=1e-10`; PyTorch uses `EPS=1e-6` from isa.py. These are different by design (different precision contexts).
 - **Recency bias in addressing** — `eps * write_count` term ensures later writes at same address win. Architectural feature, not a hack.
 
@@ -112,19 +118,19 @@ Compiled transformer executor — programs run inside a transformer's own infere
 uv pip install -e ".[dev]" --system
 
 # Run integration tests
-python test_consolidated.py
-python test_wat_parser.py
+uv run test_consolidated.py
+uv run test_wat_parser.py
 
 # Run individual phase
-python dev/phases/phase14_extended_isa.py
+uv run dev/phases/phase14_extended_isa.py
 
 # Run Mojo tests (if available)
-python src/run_mojo_tests.py
+uv run src/run_mojo_tests.py
 ```
 
 ## NOTES
 
-- **File reading:** Start with `_MAP.md`. It shows every class/function with line numbers. For files >500 lines, use map-then-target pattern.
+- **File reading:** Start with `docs/reference/api.md` for function-level indexing, or `docs/reference/file-map.md` for file-level navigation. For files >500 lines, use index-then-target pattern.
 - **Environment:** `uv pip install torch numpy --system` at session start. Mojo available via `/mnt/skills/user/llm-as-computer/`.
 - **Container limits:** ~200s bash timeout, ~15 min session, 8GB RAM. Desktop: longer sessions, 16GB RAM.
 - **Phase file imports:** Phase files import from each other using bare module names. `test_consolidated.py` imports `phase14_extended_isa` directly — changing phase14 breaks integration tests.

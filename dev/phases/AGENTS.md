@@ -6,7 +6,6 @@
 
 ```
 dev/phases/
-├── _MAP.md                     # All classes/functions with line numbers (READ FIRST)
 ├── phase1_hull_cache.py        # Convex hull KV cache
 ├── phase2_parabolic.py         # Parabolic key encoding
 ├── phase2b_address_limits.py   # Extended addressing past float32
@@ -42,7 +41,7 @@ dev/phases/
 
 ## CONVENTIONS
 
-- **Every phase file is self-contained** — own test harness, own `main()`, run directly: `python dev/phases/phaseN_*.py`
+- **Every phase file is self-contained** — own test harness, own `main()`, run directly: `uv run dev/phases/phaseN_*.py`
 - **No cross-phase imports except phase4** — Phases 11-14 import `phase4_stack_machine` for reference trace generation. `test_consolidated.py` imports `phase14_extended_isa` directly.
 - **sys.path manipulation required** — Phase files add `os.path.dirname(os.path.abspath(__file__))` to `sys.path` for local imports.
 - **Two executor classes per compiled phase** — `PhaseNExecutor` (numpy) + `PhaseNPyTorchExecutor` (PyTorch), both must produce identical traces.
@@ -53,4 +52,4 @@ dev/phases/
 - **Do NOT change phase4 exports** — Phases 11-14 depend on `ReferenceExecutor`, `program`, `Instruction` from phase4.
 - **Do NOT change phase14 exports** — `test_consolidated.py` imports `Phase14Executor` and `Phase14PyTorchExecutor` directly.
 - **Do NOT assume training phases (5-10) are authoritative** — Training path was a productive wrong turn. Compiled phases (11+) are the correct approach.
-- **Phase 14 is 2885 lines** — Always read `_MAP.md` first, then targeted line ranges.
+- **Phase 14 is 2885 lines** — Use `docs/reference/api.md` for function index, then targeted line ranges.
