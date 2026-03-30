@@ -57,7 +57,7 @@ Mojo 后端执行速度达 67-126M steps/sec，约为 Python 后端（2.1-3.1M s
 
 ### 阶段脚本 (`dev/phases/`)
 
-每个阶段文件自包含，可直接 `python dev/phases/phaseN_*.py` 运行。
+每个阶段文件自包含，可直接 `uv run dev/phases/phaseN_*.py` 运行。
 
 | 文件 | 行数 | 阶段 | 说明 |
 |------|------|------|------|

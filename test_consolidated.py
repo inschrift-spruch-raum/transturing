@@ -9,6 +9,7 @@ import os
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dev', 'phases'))
 
 from isa import (
     Instruction, compare_traces, test_algorithm, test_trap_algorithm,

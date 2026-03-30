@@ -1,13 +1,36 @@
 [project]
 name = "llm-as-computer"
 version = "0.1.0"
-description = "Testing Percepta's claim that transformers can execute programs via 2D convex hull attention"
+description = "Compiled transformer executor — programs run inside a transformer's own inference loop. Each instruction fetch and memory read is a parabolic attention head."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+authors = [
+    { name = "Oskar Austegard" },
+]
+keywords = ["transformer", "attention", "interpreter", "wasm", "compiled-execution"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "numpy>=1.24",
-    "torch>=2.0"
+    "torch>=2.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+]
+
+[tool.uv]
+package = false
 
 [tool.ruff]
 lint.extend-select = ["ALL"]

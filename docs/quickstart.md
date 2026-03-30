@@ -4,7 +4,7 @@
 
 ## 前置条件
 
-- Python 3.10+
+- Python 3.12+
 - Git
 
 ## 安装
@@ -12,10 +12,10 @@
 ```bash
 git clone https://github.com/oaustegard/llm-as-computer.git
 cd llm-as-computer
-pip install numpy torch
+uv sync
 ```
 
-> 如果你用 `uv`, 可以换成 `uv pip install numpy torch --system`。
+> 鉤完倉後執行 `uv sync` 安裝所有依賴到 `.venv`。
 
 ## 运行第一个程序
 
@@ -39,7 +39,7 @@ print(trace.format_trace())
 把上面的代码保存为 `first.py`, 然后在项目根目录运行:
 
 ```bash
-python first.py
+uv run first.py
 ```
 
 ## 预期输出

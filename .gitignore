@@ -1,4 +1,27 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# uv
+.venv/
+
+# PyTorch
 *.pt
 *.pth
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+
+# Tools
+.sisyphus/
+.ruff_cache/
+
+# JavaScript
+node_modules/

@@ -16,10 +16,10 @@
 
 ```bash
 # 克隆仓库后
-uv pip install -e ".[dev]" --system
+uv sync --group dev
 
 # 或者手动安装核心依赖
-uv pip install numpy torch --system
+uv sync
 ```
 
 ### 可选依赖
@@ -31,8 +31,8 @@ uv pip install numpy torch --system
 
 ```bash
 # 运行集成测试，确认一切正常
-python test_consolidated.py
-python test_wat_parser.py
+uv run test_consolidated.py
+uv run test_wat_parser.py
 ```
 
 ## 代码规范
@@ -155,12 +155,12 @@ if not compare_traces(np_trace, torch_trace):
 
 ```bash
 # 完整集成测试
-python test_consolidated.py
-python test_wat_parser.py
+uv run test_consolidated.py
+uv run test_wat_parser.py
 
 # 单个阶段测试（每个文件独立运行）
-python dev/phases/phase14_extended_isa.py
-python dev/phases/phase17_function_calls.py
+uv run dev/phases/phase14_extended_isa.py
+uv run dev/phases/phase17_function_calls.py
 ```
 
 阶段文件（`phaseN_*.py`）是自包含的，各自带测试工具。可以直接运行。

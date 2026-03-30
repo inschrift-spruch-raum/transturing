@@ -18,6 +18,9 @@ Compiled transformer executor — programs run inside a transformer's own infere
 ├── c_pipeline.py       # C → WAT → ISA compilation (requires clang + wasm2wat)
 ├── test_consolidated.py    # Integration tests (NumPy/PyTorch equivalence)
 ├── test_wat_parser.py      # WAT parser test suite
+├── pyproject.toml      # uv project config (package = false, flat layout)
+├── uv.lock             # Reproducible dependency lockfile
+├── .python-version     # Python 3.14
 ├── dev/
 │   ├── phases/         # 20 phase exploration scripts (1–20) + result JSONs
 │   ├── FINDINGS.md     # Detailed per-phase findings
@@ -114,8 +117,11 @@ Compiled transformer executor — programs run inside a transformer's own infere
 ## COMMANDS
 
 ```bash
-# Install dependencies
-uv pip install -e ".[dev]" --system
+# Install dependencies (syncs .venv from uv.lock)
+uv sync
+
+# Install with dev tools
+uv sync --group dev
 
 # Run integration tests
 uv run test_consolidated.py
@@ -126,12 +132,20 @@ uv run dev/phases/phase14_extended_isa.py
 
 # Run Mojo tests (if available)
 uv run src/run_mojo_tests.py
+
+# Lint
+uv run ruff check .
+
+# Verify lockfile integrity
+uv sync --locked
 ```
 
 ## NOTES
 
+- **Project configuration:** `package = false` in `[tool.uv]` — flat module structure, no build system, no `__init__.py`. uv manages dependencies only.
+- **Lockfile:** `uv.lock` is committed for reproducible dependency resolution. Run `uv sync` to install from lockfile.
 - **File reading:** Start with `docs/reference/api.md` for function-level indexing, or `docs/reference/file-map.md` for file-level navigation. For files >500 lines, use index-then-target pattern.
-- **Environment:** `uv pip install torch numpy --system` at session start. Mojo available via `/mnt/skills/user/llm-as-computer/`.
+- **Environment:** `uv sync` at session start installs all dependencies. Mojo available via `/mnt/skills/user/llm-as-computer/`.
 - **Container limits:** ~200s bash timeout, ~15 min session, 8GB RAM. Desktop: longer sessions, 16GB RAM.
 - **Phase file imports:** Phase files import from each other using bare module names. `test_consolidated.py` imports `phase14_extended_isa` directly — changing phase14 breaks integration tests.
 - **C pipeline dependencies:** Requires `clang` with wasm32 target support + `wasm2wat`. Raises `EnvironmentError` if missing.
