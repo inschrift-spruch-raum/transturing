@@ -546,8 +546,16 @@ wheels = [
 name = "transturing"
 version = "0.1.0"
 source = { editable = "." }
-dependencies = [
+
+[package.optional-dependencies]
+all = [
     { name = "numpy" },
+    { name = "torch" },
+]
+numpy = [
+    { name = "numpy" },
+]
+torch = [
     { name = "torch" },
 ]
 
@@ -555,18 +563,22 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "ruff" },
+    { name = "transturing", extra = ["all"] },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "numpy", specifier = ">=1.24" },
-    { name = "torch", specifier = ">=2.0" },
+    { name = "numpy", marker = "extra == 'numpy'", specifier = ">=1.24" },
+    { name = "torch", marker = "extra == 'torch'", specifier = ">=2.0" },
+    { name = "transturing", extras = ["numpy", "torch"], marker = "extra == 'all'" },
 ]
+provides-extras = ["numpy", "torch", "all"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "ruff", specifier = ">=0.8" },
+    { name = "transturing", extras = ["all"] },
 ]
 
 [[package]]

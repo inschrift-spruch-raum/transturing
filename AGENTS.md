@@ -11,38 +11,47 @@ Compiled transformer executor — programs run inside a transformer's own infere
 ```
 ./
 ├── src/
-│   └── transturing/    # Python package (pip installable)
-│       ├── __init__.py
-│       ├── isa.py          # 55 opcodes, TokenVocab, embeddings, CompiledAttentionHead
-│       ├── executor.py     # NumPyExecutor, CompiledModel (PyTorch nn.Module), TorchExecutor
-│       ├── programs.py     # Test programs + algorithm generators (fib, mul, gcd, etc.)
-│       ├── assembler.py    # WASM-style structured control flow → flat ISA compiler
-│       ├── wat_parser.py   # WebAssembly text format parser
-│       └── c_pipeline.py   # C → WAT → ISA compilation (requires clang + wasm2wat)
+│   └── transturing/              # Python package (pip installable)
+│       ├── __init__.py           # Re-exports core API + registry
+│       ├── core/                 # Zero-dependency core
+│       │   ├── __init__.py       # Re-exports core symbols
+│       │   ├── isa.py            # 55 opcodes, DIM constants, math helpers, Trace types
+│       │   ├── abc.py            # ExecutorBackend abstract base class
+│       │   ├── registry.py       # Backend discovery (get_executor, list_backends)
+│       │   ├── programs.py       # Test programs + algorithm generators (fib, mul, gcd, etc.)
+│       │   ├── assembler.py      # WASM-style structured control flow → flat ISA compiler
+│       │   ├── wat_parser.py     # WebAssembly text format parser
+│       │   └── c_pipeline.py     # C → WAT → ISA compilation (requires clang + wasm2wat)
+│       └── backends/             # Isolated backend implementations
+│           ├── __init__.py       # Docstring only (dynamic import protection)
+│           ├── numpy_backend.py  # NumPyExecutor (reference/demo)
+│           └── torch_backend.py  # CompiledAttentionHead, TokenVocab, CompiledModel, TorchExecutor
 ├── tests/
-│   ├── test_consolidated.py # Executor correctness + dual-backend consistency tests
-│   └── test_wat_parser.py   # WAT parser test suite
+│   ├── conftest.py               # Auto-skip tests when backends not installed
+│   ├── test_consolidated.py      # Executor correctness + dual-backend consistency tests
+│   └── test_wat_parser.py        # WAT parser test suite
 ├── docs/
-│   ├── architecture/       # overview.md, memory-model.md, compilation.md
-│   ├── isa/                # index.md, opcodes.md
-│   ├── guides/             # how-it-works.md, writing-programs.md
-│   ├── development/        # findings-summary.md, rd-plan-summary.md
-│   └── reference/          # api.md, file-map.md
-├── pyproject.toml          # uv project config (src/ layout, hatchling build)
-├── uv.lock                 # Reproducible dependency lockfile
-└── .python-version         # Python 3.14
+│   ├── architecture/             # overview.md, memory-model.md, compilation.md
+│   ├── isa/                      # index.md, opcodes.md
+│   ├── guides/                   # how-it-works.md, writing-programs.md
+│   ├── development/              # findings-summary.md, rd-plan-summary.md
+│   └── reference/                # api.md, file-map.md
+├── pyproject.toml                # uv project config (src/ layout, hatchling build, optional deps)
+├── uv.lock                       # Reproducible dependency lockfile
+└── .python-version               # Python 3.14
 ```
 
 ## WHERE TO LOOK
 
 | Task | Location | Notes |
 |------|----------|-------|
-| Add an opcode | `src/transturing/isa.py` + `executor.py` | Must update both NumPyExecutor AND CompiledModel |
-| Write a test program | `src/transturing/programs.py` | Follow `make_*` pattern, add to test runner |
-| Understand an embedding | `src/transturing/isa.py` → `embed_*` functions | After line 730; see DIM layout at line 114 |
-| Debug execution trace | `src/transturing/isa.py` → `compare_traces()` | Step-by-step diff |
-| Add structured control flow | `src/transturing/assembler.py` | WASM-style block/loop/if/br |
-| Parse WAT text | `src/transturing/wat_parser.py` | Handles full WAT syntax |
+| Add an opcode | `src/transturing/core/isa.py` + both backends | Must update NumPyExecutor AND CompiledModel |
+| Write a test program | `src/transturing/core/programs.py` | Follow `make_*` pattern, add to test runner |
+| Understand an embedding | `src/transturing/backends/torch_backend.py` → `embed_*` functions | See DIM layout in `core/isa.py` |
+| Debug execution trace | `src/transturing/core/isa.py` → `compare_traces()` | Step-by-step diff |
+| Add structured control flow | `src/transturing/core/assembler.py` | WASM-style block/loop/if/br |
+| Parse WAT text | `src/transturing/core/wat_parser.py` | Handles full WAT syntax |
+| Use a backend | `from transturing import get_executor` | `get_executor('numpy')` or `get_executor('torch')` |
 | Read documentation | `docs/` | Start with `docs/guides/how-it-works.md` |
 
 ## ARCHITECTURE
@@ -62,7 +71,7 @@ Compiled transformer executor — programs run inside a transformer's own infere
 
 **Parabolic encoding:** `k = (2j, -j²)` encodes position j. Dot-product attention peaks sharply at target. Same encoding for all memory spaces. Float32 limit ~4K indices; float64 extends to 25M+.
 
-**Import chain:** `isa.py` ← `executor.py` ← `programs.py` ← `assembler.py` ← `wat_parser.py` ← `c_pipeline.py`. Relative imports within the `transturing` package. External consumers use `from transturing.X import ...`.
+**Import chain:** `core/isa.py` ← `core/programs.py` ← `core/assembler.py` ← `core/wat_parser.py` ← `core/c_pipeline.py`. Backends import from core via `from ..core.isa import ...`. External consumers use `from transturing.X import ...`.
 
 ## PHASES
 
@@ -98,7 +107,7 @@ Compiled transformer executor — programs run inside a transformer's own infere
 - **NEVER train the compiled model** — All weights set analytically via `_compile_weights()`. Training path (Phases 5-10) was a productive wrong turn.
 - **NEVER use float32 for compiled models** — Float64 mandatory for parabolic addressing correctness. Score values scale as `addr²`; float32 limit ~4K indices.
 - **NEVER suppress type errors** — No `as any`, `@ts-ignore`, `# type: ignore`.
-- **NEVER read large files blind** — Use `docs/reference/api.md` as function index, then targeted line-range reads. `executor.py` (~1360 lines) is the main trap.
+- **NEVER read large files blind** — Use `docs/reference/api.md` as function index, then targeted line-range reads. `torch_backend.py` (~1095 lines) is the main trap.
 - **Do NOT pin exact dependency versions** — Research repo; use `>=` lower bounds.
 - **Do NOT use bare module imports** — Always `from transturing.X import ...`, never `from isa import ...`.
 
@@ -108,7 +117,7 @@ Compiled transformer executor — programs run inside a transformer's own infere
 - **Dual-executor validation** — Consistency tests verify NumPyExecutor AND TorchExecutor produce identical traces via `compare_traces()`.
 - **i32 overflow semantics** — All arithmetic applies `result & 0xFFFFFFFF` (WASM standard). `PUSH 0xFFFFFFFF; PUSH 1; ADD` → `0`.
 - **TRAP for runtime errors** — Division by zero, stack underflow emit OP_TRAP (opcode 99), not Python exceptions.
-- **Self-referencing EPS values** — NumPy executors use `eps=1e-10`; PyTorch uses `EPS=1e-6` from isa.py. These are different by design (different precision contexts).
+- **Self-referencing EPS values** — NumPy executor uses `eps=1e-10`; PyTorch uses `EPS=1e-6` defined in `torch_backend.py`. These are different by design (different precision contexts).
 - **Recency bias in addressing** — `eps * write_count` term ensures later writes at same address win. Architectural feature, not a hack.
 
 ## COMMANDS

@@ -6,87 +6,67 @@ Cross-validates NumPy vs PyTorch traces for internal consistency.
 
 import pytest
 
-from transturing.isa import (
-    Instruction,
-    compare_traces,
-    OP_PUSH,
-    OP_POP,
-    OP_ADD,
-    OP_DUP,
-    OP_HALT,
-    OP_SUB,
-    OP_JZ,
-    OP_JNZ,
-    OP_NOP,
-    OP_SWAP,
-    OP_OVER,
-    OP_ROT,
-    OP_MUL,
+from transturing.backends.numpy_backend import NumPyExecutor
+from transturing.backends.torch_backend import TorchExecutor
+from transturing.core.isa import (
+    OP_AND,
     OP_DIV_S,
-    OP_DIV_U,
+    OP_DUP,
+    OP_EQ,
+    OP_GE_S,
+    OP_GT_S,
+    OP_HALT,
+    OP_JNZ,
+    OP_JZ,
+    OP_LE_S,
+    OP_LT_S,
+    OP_NE,
+    OP_OR,
+    OP_PUSH,
     OP_REM_S,
     OP_REM_U,
-    OP_EQZ,
-    OP_EQ,
-    OP_NE,
-    OP_LT_S,
-    OP_LT_U,
-    OP_GT_S,
-    OP_GT_U,
-    OP_LE_S,
-    OP_LE_U,
-    OP_GE_S,
-    OP_GE_U,
-    OP_AND,
-    OP_OR,
-    OP_XOR,
+    OP_ROTL,
+    OP_ROTR,
     OP_SHL,
     OP_SHR_S,
     OP_SHR_U,
-    OP_ROTL,
-    OP_ROTR,
-    OP_CLZ,
-    OP_CTZ,
-    OP_POPCNT,
-    OP_ABS,
-    OP_NEG,
-    OP_SELECT,
+    OP_SUB,
     OP_TRAP,
+    OP_XOR,
+    Instruction,
+    compare_traces,
 )
-from transturing.executor import NumPyExecutor, TorchExecutor
-from transturing.programs import (
+from transturing.core.programs import (
     ALL_TESTS,
-    make_fibonacci,
-    make_power_of_2,
-    make_sum_1_to_n,
-    make_multiply,
-    make_is_even,
-    make_native_multiply,
-    make_native_divmod,
-    make_native_remainder,
-    make_native_is_even,
-    make_factorial,
-    make_gcd,
-    make_compare_eqz,
-    make_compare_binary,
-    make_native_max,
-    make_native_abs,
-    make_native_clamp,
-    make_bitwise_binary,
-    make_popcount_loop,
     make_bit_extract,
+    make_bitwise_binary,
+    make_compare_binary,
+    make_compare_eqz,
+    make_factorial,
+    make_fibonacci,
+    make_gcd,
+    make_is_even,
+    make_is_power_of_2,
+    make_log2_floor,
+    make_multiply,
+    make_native_abs,
+    make_native_abs_unary,
+    make_native_clamp,
     make_native_clz,
     make_native_ctz,
-    make_native_popcnt,
-    make_native_abs_unary,
+    make_native_divmod,
+    make_native_is_even,
+    make_native_max,
+    make_native_multiply,
     make_native_neg,
+    make_native_popcnt,
+    make_native_remainder,
+    make_popcount_loop,
+    make_power_of_2,
     make_select,
     make_select_max,
-    make_log2_floor,
-    make_is_power_of_2,
-    fib,
+    make_sum_1_to_n,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -417,7 +397,7 @@ def test_numpy_phase14_unary(np_exec, name, prog, expected):
 def test_numpy_trap(np_exec, name, prog):
     trace = np_exec.execute(prog)
     trapped = trace.steps and trace.steps[-1].op == OP_TRAP
-    assert trapped, f"Executor did not trap"
+    assert trapped, "Executor did not trap"
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +427,7 @@ def test_torch_phase14(pt_exec, name, prog, expected):
 def test_torch_trap(pt_exec, name, prog):
     trace = pt_exec.execute(prog)
     trapped = trace.steps and trace.steps[-1].op == OP_TRAP
-    assert trapped, f"Executor did not trap"
+    assert trapped, "Executor did not trap"
 
 
 # ---------------------------------------------------------------------------

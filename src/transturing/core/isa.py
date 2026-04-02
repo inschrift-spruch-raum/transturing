@@ -1,24 +1,21 @@
 """ISA definition for the compiled transformer stack machine.
 
-Consolidated from phase4, phase12, phase13, phase14. Contains:
+Core, zero-dependency module containing:
   - Types: Instruction, Trace, TraceStep
-  - Constants: D_MODEL, DTYPE, EPS, N_OPCODES, all DIM_* layout
+  - Constants: D_MODEL, N_OPCODES, MASK32, TOKENS_PER_STEP, all DIM_* layout
   - Opcodes: OP_PUSH through OP_SELECT, OP_TRAP
   - Maps: OP_NAMES, OPCODE_DIM_MAP, OPCODE_IDX, NONLINEAR_OPS
   - Math helpers: _trunc_div, _trunc_rem, bitwise ops
-  - CompiledAttentionHead: nn.Module for hard-max attention
-  - Embedding functions: embed_program_token, embed_stack_entry, embed_state
   - Test utilities: compare_traces, test_algorithm, test_trap_algorithm
+  - Program builder: program()
+
+Torch-specific items (CompiledAttentionHead, TokenVocab, embed_* functions, DTYPE, EPS)
+live in transturing.backends.torch_backend.
 """
 
-import numpy as np
-import torch
-import torch.nn as nn
-from typing import List, Optional
 from dataclasses import dataclass, field
 
-
-# ─── Types (from phase4) ──────────────────────────────────────────
+# ─── Types ──────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -41,7 +38,7 @@ class Instruction:
         return name
 
 
-def program(*instrs) -> List[Instruction]:
+def program(*instrs) -> list[Instruction]:
     """Convenience: program(('PUSH', 3), ('PUSH', 5), ('ADD',), ('HALT',))"""
     result = []
     _name_to_op = {
@@ -121,7 +118,7 @@ class TraceStep:
     sp: int  # stack pointer AFTER execution
     top: int  # top-of-stack value AFTER execution
 
-    def tokens(self) -> List[int]:
+    def tokens(self) -> list[int]:
         return [self.op, self.arg, self.sp, self.top]
 
 
@@ -129,8 +126,8 @@ class TraceStep:
 class Trace:
     """Full execution trace: program prefix + step records."""
 
-    program: List[Instruction]
-    steps: List[TraceStep] = field(default_factory=list)
+    program: list[Instruction]
+    steps: list[TraceStep] = field(default_factory=list)
 
     def format_trace(self) -> str:
         """Human-readable trace."""
@@ -161,8 +158,6 @@ class Trace:
 # ─── Constants ────────────────────────────────────────────────────
 
 D_MODEL = 51
-DTYPE = torch.float64
-EPS = 1e-6
 
 # Token roles (from phase4, used in training phases)
 TOKENS_PER_STEP = 4
@@ -615,391 +610,7 @@ def _sign_extend_16(val):
     return v - 0x10000 if v >= 0x8000 else v
 
 
-# ─── Token Vocabulary and Embedding Tables ────────────────────────
-
-
-class TokenVocab:
-    """Fixed token vocabulary for the compiled transformer.
-
-    Covers all token types that appear in execution traces:
-      - Special tokens: PAD, COMMIT, BRANCH_TAKEN, BRANCH_NOT_TAKEN
-      - Opcodes: 55 ISA opcodes + TRAP (56 tokens)
-      - Byte values: integers 0-255 (256 tokens)
-      - SP deltas: -3 to +3 (7 tokens)
-
-    Provides encode(token) -> int and decode(int) -> token,
-    plus compiled nn.Embedding and nn.Linear (unembedding) tables.
-    """
-
-    # --- Token type tags (used in encode/decode) ---
-    OPCODE = "op"
-    VALUE = "val"
-    SP_DELTA = "sp_delta"
-    SPECIAL = "special"
-
-    # --- Special token names ---
-    PAD = "PAD"
-    COMMIT = "COMMIT"
-    BRANCH_TAKEN = "BRANCH_TAKEN"
-    BRANCH_NOT_TAKEN = "BRANCH_NOT_TAKEN"
-
-    # --- Layout: reserved ranges ---
-    _SPECIAL_BASE = 0
-    _SPECIAL_COUNT = 4
-    _OPCODE_BASE = _SPECIAL_BASE + _SPECIAL_COUNT  # 4
-    _OPCODE_COUNT = N_OPCODES + 1  # 55 opcodes + TRAP = 56
-    _VALUE_BASE = _OPCODE_BASE + _OPCODE_COUNT  # 60
-    _VALUE_COUNT = 256  # byte values 0-255
-    _SP_DELTA_BASE = _VALUE_BASE + _VALUE_COUNT  # 316
-    _SP_DELTA_MIN = -3
-    _SP_DELTA_MAX = 3
-    _SP_DELTA_COUNT = _SP_DELTA_MAX - _SP_DELTA_MIN + 1  # 7
-
-    VOCAB_SIZE = _SP_DELTA_BASE + _SP_DELTA_COUNT  # 323
-
-    # --- Special token IDs ---
-    PAD_ID = 0
-    COMMIT_ID = 1
-    BRANCH_TAKEN_ID = 2
-    BRANCH_NOT_TAKEN_ID = 3
-
-    _SPECIAL_NAMES = {
-        PAD_ID: PAD,
-        COMMIT_ID: COMMIT,
-        BRANCH_TAKEN_ID: BRANCH_TAKEN,
-        BRANCH_NOT_TAKEN_ID: BRANCH_NOT_TAKEN,
-    }
-    _SPECIAL_IDS = {v: k for k, v in _SPECIAL_NAMES.items()}
-
-    # --- Opcode <-> token ID mapping ---
-    # OP codes are 1-55 (contiguous) + 99 (TRAP).
-    # Map them to sequential slots starting at _OPCODE_BASE.
-    _OPCODE_TO_SLOT = {}  # built in __init_subclass__ / class body
-    _SLOT_TO_OPCODE = {}
-
-    def __init__(self):
-        # Build opcode mappings from the canonical OPCODE_IDX map
-        self._opcode_to_tid = {}
-        self._tid_to_opcode = {}
-        for op_code, idx in OPCODE_IDX.items():
-            tid = self._OPCODE_BASE + idx
-            self._opcode_to_tid[op_code] = tid
-            self._tid_to_opcode[tid] = op_code
-        # TRAP gets the last opcode slot
-        trap_tid = self._OPCODE_BASE + N_OPCODES  # slot 59
-        self._opcode_to_tid[OP_TRAP] = trap_tid
-        self._tid_to_opcode[trap_tid] = OP_TRAP
-
-        self.vocab_size = self.VOCAB_SIZE
-
-    # ---- encode / decode ----
-
-    def encode(self, token):
-        """Encode a token to its vocabulary ID.
-
-        Args:
-            token: one of:
-              - ("op", opcode_int)       e.g. ("op", 1) for PUSH
-              - ("val", int_0_to_255)    e.g. ("val", 42)
-              - ("sp_delta", int)        e.g. ("sp_delta", -1)
-              - ("special", name_str)    e.g. ("special", "COMMIT")
-              - str for special names    e.g. "PAD", "COMMIT"
-
-        Returns:
-            int: token ID in [0, vocab_size)
-        """
-        if isinstance(token, str):
-            # Shorthand: bare string = special token
-            if token in self._SPECIAL_IDS:
-                return self._SPECIAL_IDS[token]
-            raise ValueError(f"Unknown special token: {token!r}")
-
-        tag, val = token
-        if tag == self.OPCODE:
-            if val not in self._opcode_to_tid:
-                raise ValueError(f"Unknown opcode: {val}")
-            return self._opcode_to_tid[val]
-        elif tag == self.VALUE:
-            if not (0 <= val <= 255):
-                raise ValueError(f"Value out of byte range: {val}")
-            return self._VALUE_BASE + val
-        elif tag == self.SP_DELTA:
-            if not (self._SP_DELTA_MIN <= val <= self._SP_DELTA_MAX):
-                raise ValueError(
-                    f"SP delta {val} out of range [{self._SP_DELTA_MIN}, {self._SP_DELTA_MAX}]"
-                )
-            return self._SP_DELTA_BASE + (val - self._SP_DELTA_MIN)
-        elif tag == self.SPECIAL:
-            if val in self._SPECIAL_IDS:
-                return self._SPECIAL_IDS[val]
-            raise ValueError(f"Unknown special token: {val!r}")
-        else:
-            raise ValueError(f"Unknown token tag: {tag!r}")
-
-    def decode(self, tid):
-        """Decode a token ID back to its structured representation.
-
-        Returns:
-            tuple: (tag, value) — e.g. ("op", 1), ("val", 42), ("special", "PAD")
-        """
-        if not (0 <= tid < self.vocab_size):
-            raise ValueError(f"Token ID {tid} out of range [0, {self.vocab_size})")
-
-        if tid < self._OPCODE_BASE:
-            # Special token
-            return (self.SPECIAL, self._SPECIAL_NAMES[tid])
-        elif tid < self._VALUE_BASE:
-            # Opcode
-            return (self.OPCODE, self._tid_to_opcode[tid])
-        elif tid < self._SP_DELTA_BASE:
-            # Byte value
-            return (self.VALUE, tid - self._VALUE_BASE)
-        else:
-            # SP delta
-            return (self.SP_DELTA, (tid - self._SP_DELTA_BASE) + self._SP_DELTA_MIN)
-
-    # ---- Compiled embedding / unembedding ----
-
-    def compile_embedding(self, d_model=None):
-        """Build nn.Embedding with analytically set weights.
-
-        Each token's embedding row is set so that:
-          - Opcode tokens: DIM_OPCODE = opcode_int, DIM_IS_* = 1.0, DIM_ONE = 1.0
-          - Value tokens: DIM_VALUE = value_int, DIM_ONE = 1.0
-          - SP delta tokens: DIM_SP = delta_int, DIM_ONE = 1.0
-          - Special tokens: DIM_ONE = 1.0 (PAD is all zeros)
-
-        Returns:
-            nn.Embedding with shape (vocab_size, d_model), weights frozen.
-        """
-        if d_model is None:
-            d_model = D_MODEL
-        emb = nn.Embedding(self.vocab_size, d_model)
-        W = torch.zeros(self.vocab_size, d_model, dtype=DTYPE)
-
-        # Special tokens
-        # PAD: all zeros (row 0 stays zero)
-        # COMMIT: unique signature via DIM_OPCODE = -1
-        W[self.COMMIT_ID, DIM_ONE] = 1.0
-        W[self.COMMIT_ID, DIM_OPCODE] = -1.0
-        # BRANCH_TAKEN: unique signature via DIM_OPCODE = -2
-        W[self.BRANCH_TAKEN_ID, DIM_ONE] = 1.0
-        W[self.BRANCH_TAKEN_ID, DIM_OPCODE] = -2.0
-        # BRANCH_NOT_TAKEN: unique signature via DIM_OPCODE = -3
-        W[self.BRANCH_NOT_TAKEN_ID, DIM_ONE] = 1.0
-        W[self.BRANCH_NOT_TAKEN_ID, DIM_OPCODE] = -3.0
-
-        # Opcode tokens — match embed_program_token(pos=0, Instruction(op, 0))
-        for op_code, tid in self._opcode_to_tid.items():
-            W[tid, DIM_IS_PROG] = 1.0
-            W[tid, DIM_OPCODE] = float(op_code)
-            W[tid, DIM_ONE] = 1.0
-            dim = OPCODE_DIM_MAP.get(op_code)
-            if dim is not None and dim < d_model:
-                W[tid, dim] = 1.0
-
-        # Value tokens — match embed_stack_entry(addr=0, value=v, write_order=0)
-        # DIM_IS_STACK marks these as value-type (matching embed_stack_entry)
-        for v in range(256):
-            tid = self._VALUE_BASE + v
-            W[tid, DIM_IS_STACK] = 1.0
-            W[tid, DIM_VALUE] = float(v)
-            W[tid, DIM_ONE] = 1.0
-
-        # SP delta tokens — DIM_IS_STATE marks these as state-type (matching embed_state)
-        for delta in range(self._SP_DELTA_MIN, self._SP_DELTA_MAX + 1):
-            tid = self._SP_DELTA_BASE + (delta - self._SP_DELTA_MIN)
-            W[tid, DIM_IS_STATE] = 1.0
-            W[tid, DIM_SP] = float(delta)
-            W[tid, DIM_ONE] = 1.0
-
-        emb.weight = nn.Parameter(W, requires_grad=False)
-        return emb
-
-    def compile_unembedding(self, embedding=None, d_model=None):
-        """Build nn.Linear unembedding head s.t. argmax(unembed(embed(tok))) == tok.
-
-        Uses the transpose of the embedding matrix as the unembedding weight,
-        with per-token bias correction to handle varying embedding norms.
-
-        Args:
-            embedding: nn.Embedding from compile_embedding(). If None, builds one.
-            d_model: model dimension (used only if embedding is None).
-
-        Returns:
-            nn.Linear(d_model, vocab_size) with frozen weights.
-        """
-        if d_model is None:
-            d_model = D_MODEL
-        if embedding is None:
-            embedding = self.compile_embedding(d_model)
-
-        E = embedding.weight.data  # (vocab_size, d_model)
-        unembed = nn.Linear(d_model, self.vocab_size, bias=True)
-
-        # W = E, bias = -0.5 * ||e_i||^2  →  score_i = e_i · x - 0.5||e_i||^2
-        # This is equivalent to finding the nearest embedding by dot product,
-        # corrected for norm differences.
-        norms_sq = (E * E).sum(dim=1)  # (vocab_size,)
-        unembed.weight = nn.Parameter(E.clone(), requires_grad=False)
-        unembed.bias = nn.Parameter(-0.5 * norms_sq, requires_grad=False)
-
-        return unembed
-
-    def opcode_name(self, op_code):
-        """Human-readable name for an opcode."""
-        return OP_NAMES.get(op_code, f"?{op_code}")
-
-    def token_name(self, tid):
-        """Human-readable name for a token ID."""
-        tag, val = self.decode(tid)
-        if tag == self.SPECIAL:
-            return val
-        elif tag == self.OPCODE:
-            return self.opcode_name(val)
-        elif tag == self.VALUE:
-            return f"V{val}"
-        elif tag == self.SP_DELTA:
-            return f"SP{'+' if val >= 0 else ''}{val}"
-        return f"?{tid}"
-
-    def __repr__(self):
-        return (
-            f"TokenVocab(vocab_size={self.vocab_size}, "
-            f"opcodes={len(self._opcode_to_tid)}, "
-            f"values=256, sp_deltas={self._SP_DELTA_COUNT}, "
-            f"specials={self._SPECIAL_COUNT})"
-        )
-
-
-# ─── Compiled Attention Head (from phase12) ───────────────────────
-
-
-class CompiledAttentionHead(nn.Module):
-    """Hard-max attention head with analytically set W_Q, W_K, W_V.
-
-    Computes:
-      q = W_Q @ query_embedding           (head_dim,)
-      K = W_K @ memory_embeddings          (N, head_dim)
-      V = W_V @ memory_embeddings          (N, v_dim)
-      scores = K @ q                       (N,)
-      output = V[argmax(scores)]           (v_dim,)
-
-    head_dim=2 for parabolic key space.
-    v_dim=1 for scalar value extraction.
-    """
-
-    def __init__(self, d_model=D_MODEL, head_dim=2, v_dim=1, use_bias_q=False):
-        super().__init__()
-        self.W_Q = nn.Linear(d_model, head_dim, bias=use_bias_q)
-        self.W_K = nn.Linear(d_model, head_dim, bias=False)
-        self.W_V = nn.Linear(d_model, v_dim, bias=False)
-        self.double()
-
-    def forward(self, query_emb, memory_embs):
-        """Hard-max attention lookup.
-
-        Args:
-            query_emb: (D,) single query embedding (float64)
-            memory_embs: (N, D) memory entries to attend over (float64)
-
-        Returns:
-            value: (v_dim,) extracted from the best-matching entry
-            score: scalar, the winning attention score
-            idx: int, the index of the selected entry
-        """
-        if memory_embs.shape[0] == 0:
-            return (
-                torch.zeros(self.W_V.out_features, dtype=DTYPE),
-                torch.tensor(-float("inf"), dtype=DTYPE),
-                -1,
-            )
-
-        q = self.W_Q(query_emb)
-        K = self.W_K(memory_embs)
-        V = self.W_V(memory_embs)
-
-        scores = K @ q
-        best = scores.argmax().item()
-
-        return V[best], scores[best], best
-
-
-# ─── Embedding Functions (phase14 versions with OPCODE_DIM_MAP) ──
-
-
-def embed_program_token(pos, instr):
-    """Create 36-dim embedding for a program instruction."""
-    emb = torch.zeros(D_MODEL, dtype=DTYPE)
-    emb[DIM_IS_PROG] = 1.0
-    emb[DIM_PROG_KEY_0] = 2.0 * pos
-    emb[DIM_PROG_KEY_1] = -float(pos * pos)
-    emb[DIM_OPCODE] = float(instr.op)
-    emb[DIM_VALUE] = float(instr.arg)
-    emb[DIM_ONE] = 1.0
-    dim = OPCODE_DIM_MAP.get(instr.op)
-    if dim is not None:
-        emb[dim] = 1.0
-    return emb
-
-
-def embed_stack_entry(addr, value, write_order):
-    """Create 36-dim embedding for a stack write record."""
-    emb = torch.zeros(D_MODEL, dtype=DTYPE)
-    emb[DIM_IS_STACK] = 1.0
-    emb[DIM_STACK_KEY_0] = 2.0 * addr
-    emb[DIM_STACK_KEY_1] = -float(addr * addr) + EPS * write_order
-    emb[DIM_VALUE] = float(value)
-    emb[DIM_ONE] = 1.0
-    return emb
-
-
-def embed_local_entry(local_idx, value, write_order):
-    """Create embedding for a local variable write record."""
-    emb = torch.zeros(D_MODEL, dtype=DTYPE)
-    emb[DIM_IS_LOCAL] = 1.0
-    emb[DIM_LOCAL_KEY_0] = 2.0 * local_idx
-    emb[DIM_LOCAL_KEY_1] = -float(local_idx * local_idx) + EPS * write_order
-    emb[DIM_VALUE] = float(value)
-    emb[DIM_ONE] = 1.0
-    return emb
-
-
-def embed_heap_entry(addr, value, write_order):
-    """Create embedding for a heap memory write record."""
-    emb = torch.zeros(D_MODEL, dtype=DTYPE)
-    emb[DIM_IS_HEAP] = 1.0
-    emb[DIM_HEAP_KEY_0] = 2.0 * addr
-    emb[DIM_HEAP_KEY_1] = -float(addr * addr) + EPS * write_order
-    emb[DIM_VALUE] = float(value)
-    emb[DIM_ONE] = 1.0
-    return emb
-
-
-def embed_call_frame(depth, ret_addr, saved_sp, locals_base, write_order):
-    """Create embedding for a call stack frame."""
-    emb = torch.zeros(D_MODEL, dtype=DTYPE)
-    emb[DIM_IS_CALL_STACK] = 1.0
-    emb[DIM_CALL_KEY_0] = 2.0 * depth
-    emb[DIM_CALL_KEY_1] = -float(depth * depth) + EPS * write_order
-    emb[DIM_CALL_RET_ADDR] = float(ret_addr)
-    emb[DIM_CALL_SAVED_SP] = float(saved_sp)
-    emb[DIM_CALL_LOCALS_BASE] = float(locals_base)
-    emb[DIM_ONE] = 1.0
-    return emb
-
-
-def embed_state(ip, sp):
-    """Create 36-dim query embedding encoding current execution state."""
-    emb = torch.zeros(D_MODEL, dtype=DTYPE)
-    emb[DIM_IS_STATE] = 1.0
-    emb[DIM_IP] = float(ip)
-    emb[DIM_SP] = float(sp)
-    emb[DIM_ONE] = 1.0
-    return emb
-
-
-# ─── Test Utilities (from phase13/phase14) ────────────────────────
+# ─── Test Utilities ────────────────────────────────────────────────
 
 
 def compare_traces(trace_a, trace_b):
@@ -1029,7 +640,7 @@ def test_algorithm(name, prog, expected, np_exec, pt_exec, verbose=False):
     print(
         f"  {status}  {name:30s}  expected={expected:>6}  "
         f"numpy={np_top:>6}  torch={pt_top:>6}  "
-        f"steps={len(np_trace.steps):>4}  trace_match={'Y' if match else 'N'}"
+        f"steps={len(np_trace.steps):>4}  trace_match={'Y' if match else 'N'}",
     )
 
     if not all_ok and verbose:
@@ -1066,14 +677,14 @@ def test_trap_algorithm(name, prog, np_exec, pt_exec, verbose=False):
     )
     print(
         f"  {status}  {name:30s}  numpy={np_label:>10}  torch={pt_label:>10}  "
-        f"trace_match={'Y' if match else 'N'}"
+        f"trace_match={'Y' if match else 'N'}",
     )
 
     if not all_ok and verbose:
         if not np_trapped:
-            print(f"         NumPy did not trap")
+            print("         NumPy did not trap")
         if not pt_trapped:
-            print(f"         PyTorch did not trap")
+            print("         PyTorch did not trap")
         if not match:
             print(f"         Trace mismatch: {detail}")
 

@@ -1,12 +1,7 @@
-"""LLM-as-Computer: compiled transformer executor.
+"""Core package: ISA definition, types, backend abstraction, and public API."""
 
-Three-layer architecture:
-  - core: Zero-dependency ISA, types, programs, assemblers
-  - backends.numpy: NumPy-based demo executor
-  - backends.torch: PyTorch-based production executor
-"""
-
-from .core.isa import (
+from .abc import ExecutorBackend
+from .isa import (
     D_MODEL,
     MASK32,
     N_OPCODES,
@@ -19,13 +14,14 @@ from .core.isa import (
     test_algorithm,
     test_trap_algorithm,
 )
-from .core.registry import get_executor, list_backends
+from .registry import get_executor, list_backends, register_backend
 
 __all__ = [
     "D_MODEL",
     "MASK32",
     "N_OPCODES",
     "TOKENS_PER_STEP",
+    "ExecutorBackend",
     "Instruction",
     "Trace",
     "TraceStep",
@@ -33,6 +29,7 @@ __all__ = [
     "get_executor",
     "list_backends",
     "program",
+    "register_backend",
     "test_algorithm",
     "test_trap_algorithm",
 ]

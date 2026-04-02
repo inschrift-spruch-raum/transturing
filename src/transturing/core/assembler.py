@@ -39,16 +39,19 @@ jumps in the comparison chain (N case-JNZ + 1 default jump).
 References
 ----------
   Issue #36: Tier 3 Chunk 1 — Structured control flow assembler + BR_TABLE
+
 """
 
 from .isa import (
-    Instruction,
-    OP_PUSH,
-    OP_POP,
     OP_DUP,
     OP_EQ,
-    OP_JZ,
     OP_JNZ,
+    OP_JZ,
+    OP_POP,
+    OP_PUSH,
+    Instruction,
+)
+from .isa import (
     program as _flat,
 )
 
@@ -83,6 +86,7 @@ def compile_structured(wasm_instrs):
             ('HALT',),
         ])
         # Flat: PUSH 5; PUSH 1; JNZ 6; PUSH 99; HALT
+
     """
     flat = []  # growing list of Instruction
     lbl_stack = []  # control-flow frames (dicts) pushed by BLOCK/LOOP/IF
@@ -125,7 +129,7 @@ def compile_structured(wasm_instrs):
         if idx < 0:
             raise ValueError(
                 f"BR/BR_IF/BR_TABLE depth {n} exceeds label stack depth "
-                f"{len(lbl_stack)}"
+                f"{len(lbl_stack)}",
             )
         return lbl_stack[idx]
 
@@ -152,7 +156,7 @@ def compile_structured(wasm_instrs):
     for raw in wasm_instrs:
         if not isinstance(raw, (list, tuple)):
             raise TypeError(
-                f"Expected tuple/list instruction, got {type(raw).__name__}: {raw!r}"
+                f"Expected tuple/list instruction, got {type(raw).__name__}: {raw!r}",
             )
         name = raw[0].upper() if isinstance(raw[0], str) else raw[0]
 
@@ -165,7 +169,7 @@ def compile_structured(wasm_instrs):
                     "kind": "loop",
                     "start": len(flat),  # backward target = current position
                     "end": _alloc(),
-                }
+                },
             )
 
         elif name == "IF":

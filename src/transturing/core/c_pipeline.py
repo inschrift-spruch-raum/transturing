@@ -15,6 +15,7 @@ Required external tools:
 References:
     Issue #51: C → WASM → tokens end-to-end pipeline
     Issue #49: WAT parser (dependency)
+
 """
 
 import os
@@ -22,11 +23,9 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import List, Optional
 
 from .isa import Instruction
 from .wat_parser import parse_wat
-
 
 # ─── Unsupported WASM features ────────────────────────────────────
 
@@ -57,6 +56,7 @@ def _check_toolchain() -> dict:
 
     Returns:
         dict with 'clang' and 'wasm2wat' keys, values are paths or None.
+
     """
     return {
         "clang": shutil.which("clang"),
@@ -70,7 +70,7 @@ def _has_toolchain() -> bool:
     return tools["clang"] is not None and tools["wasm2wat"] is not None
 
 
-def _check_unsupported_features(wat_text: str) -> List[str]:
+def _check_unsupported_features(wat_text: str) -> list[str]:
     """Scan WAT text for unsupported WASM features.
 
     Returns list of human-readable error messages for each unsupported
@@ -105,6 +105,7 @@ def _extract_function_wat(wat_text: str, func_name: str) -> str:
 
     Raises:
         ValueError: If the function is not found.
+
     """
     if not func_name.startswith("$"):
         func_name = "$" + func_name
@@ -121,7 +122,7 @@ def _extract_function_wat(wat_text: str, func_name: str) -> str:
         available = re.findall(r"\(func\s+(\$\w+)", wat_text)
         raise ValueError(
             f"Function {func_name} not found in WAT module. "
-            f"Available functions: {available}"
+            f"Available functions: {available}",
         )
 
     # Find the matching closing paren
@@ -170,7 +171,7 @@ def compile_c_to_wat(
     source: str,
     *,
     opt_level: str = "-O1",
-    extra_clang_args: Optional[List[str]] = None,
+    extra_clang_args: list[str] | None = None,
 ) -> str:
     """Compile C source to WAT text.
 
@@ -188,17 +189,18 @@ def compile_c_to_wat(
     Raises:
         RuntimeError: If clang or wasm2wat invocation fails.
         EnvironmentError: If required tools are not installed.
+
     """
     tools = _check_toolchain()
     if not tools["clang"]:
-        raise EnvironmentError(
+        raise OSError(
             "clang not found. Install with: apt install clang lld\n"
-            "clang must support --target=wasm32-unknown-unknown"
+            "clang must support --target=wasm32-unknown-unknown",
         )
     if not tools["wasm2wat"]:
-        raise EnvironmentError(
+        raise OSError(
             "wasm2wat not found. Install with: apt install wabt\n"
-            "Or download from https://github.com/WebAssembly/wabt/releases"
+            "Or download from https://github.com/WebAssembly/wabt/releases",
         )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -251,11 +253,11 @@ def compile_c_to_wat(
 def compile_c(
     source: str,
     *,
-    func_name: Optional[str] = None,
+    func_name: str | None = None,
     opt_level: str = "-O1",
-    extra_clang_args: Optional[List[str]] = None,
+    extra_clang_args: list[str] | None = None,
     strict: bool = True,
-) -> List[Instruction]:
+) -> list[Instruction]:
     """Compile C source to List[Instruction] for execution.
 
     This is the main entry point for the C → WASM → tokens pipeline.
@@ -284,10 +286,11 @@ def compile_c(
             int add(int a, int b) { return a + b; }
         ''', func_name='add')
         # Execute with arguments: push args, then run
-        from isa import program
-        from executor import NumPyExecutor
+        from transturing.core.isa import program
+        from transturing.backends.numpy_backend import NumPyExecutor
         full = program(('PUSH', 3), ('PUSH', 5)) + prog
         result = NumPyExecutor().execute(full)
+
     """
     wat_text = compile_c_to_wat(
         source,
@@ -312,7 +315,7 @@ def compile_c(
                 + "\n\nTips:\n"
                 "  - Use -O0 or -O1 to reduce loop strength-reduction to i64\n"
                 "  - Avoid float/double types\n"
-                "  - Keep arithmetic to 32-bit integers"
+                "  - Keep arithmetic to 32-bit integers",
             )
 
     n_params = _count_params(func_wat)
@@ -343,14 +346,15 @@ def compile_c(
 
 
 def _offset_jumps(
-    prefix: List[Instruction], body: List[Instruction]
-) -> List[Instruction]:
+    prefix: list[Instruction],
+    body: list[Instruction],
+) -> list[Instruction]:
     """Prepend prefix instructions to body, offsetting all jump targets in body.
 
     Jump instructions (JZ, JNZ) in body have absolute addresses that
     need to be shifted by len(prefix).
     """
-    from .isa import OP_JZ, OP_JNZ
+    from .isa import OP_JNZ, OP_JZ
 
     offset = len(prefix)
     adjusted = []
@@ -403,9 +407,9 @@ def _auto_detect_function(wat_text: str) -> str:
 
 def compile_and_run(
     source: str,
-    args: List[int],
+    args: list[int],
     *,
-    func_name: Optional[str] = None,
+    func_name: str | None = None,
     opt_level: str = "-O1",
     max_steps: int = 50000,
 ) -> int:
@@ -423,9 +427,10 @@ def compile_and_run(
 
     Returns:
         Top-of-stack value after execution (the function's return value).
+
     """
+    from transturing.backends.numpy_backend import NumPyExecutor
     from .isa import program as make_prog
-    from .executor import NumPyExecutor
 
     prog = compile_c(source, func_name=func_name, opt_level=opt_level)
 
@@ -452,7 +457,7 @@ def main():
         print("Or download wabt from https://github.com/WebAssembly/wabt/releases")
         sys.exit(0)
 
-    from .executor import NumPyExecutor
+    from transturing.backends.numpy_backend import NumPyExecutor
     from .isa import program as make_prog
 
     np_exec = NumPyExecutor()

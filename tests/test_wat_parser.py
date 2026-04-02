@@ -8,11 +8,10 @@ Verifies:
 
 import pytest
 
-from transturing.wat_parser import parse_wat
-from transturing.isa import Instruction, OP_PUSH, OP_HALT, compare_traces
-from transturing.executor import NumPyExecutor
-from transturing.programs import ALL_TESTS
-
+from transturing.backends.numpy_backend import NumPyExecutor
+from transturing.core.isa import OP_PUSH, Instruction, compare_traces
+from transturing.core.programs import ALL_TESTS
+from transturing.core.wat_parser import parse_wat
 
 # ─── Fixtures ──────────────────────────────────────────────────────
 
@@ -375,7 +374,7 @@ _ALGORITHM_TESTS = [
 
 
 @pytest.mark.parametrize(
-    "name,wat_text,expected", _ALGORITHM_TESTS, ids=[t[0] for t in _ALGORITHM_TESTS]
+    "name,wat_text,expected", _ALGORITHM_TESTS, ids=[t[0] for t in _ALGORITHM_TESTS],
 )
 def test_algorithm_programs(executor, name, wat_text, expected):
     """Algorithm programs execute correctly via WAT."""
@@ -464,7 +463,7 @@ def test_s_expression_form(executor):
           (i32.const 3)
           (i32.const 5))
         halt
-    """
+    """,
     )
     trace = executor.execute(prog)
     assert trace.steps[-1].top == 8
@@ -479,7 +478,7 @@ def test_module_func_wrapper():
             i32.const 99
           )
         )
-    """
+    """,
     )
     assert prog[0] == Instruction(OP_PUSH, 99)
 

@@ -24,14 +24,13 @@ Supported WAT instructions
 References
 ----------
   Issue #49: WAT parser
+
 """
 
 import re
-from typing import List, Optional, Tuple
 
-from .isa import Instruction, OP_HALT
 from .assembler import compile_structured
-
+from .isa import OP_HALT, Instruction
 
 # ─── WAT mnemonic -> assembler tuple name mapping ─────────────────
 
@@ -116,11 +115,11 @@ _KEYWORDS = frozenset(
         "local.get",
         "local.set",
         "local.tee",
-    }
+    },
 )
 
 
-def _tokenize(text: str) -> List[str]:
+def _tokenize(text: str) -> list[str]:
     """Tokenize WAT text into a flat list of tokens.
 
     Handles:
@@ -177,7 +176,7 @@ def _parse_int(s: str) -> int:
     return int(s)
 
 
-def _tokens_to_structured(tokens: List[str]) -> List[tuple]:
+def _tokens_to_structured(tokens: list[str]) -> list[tuple]:
     """Convert flat token list to structured assembler tuples.
 
     This is the core of the parser. It walks the token stream and
@@ -556,7 +555,7 @@ def _tokens_to_structured(tokens: List[str]) -> List[tuple]:
     return instrs
 
 
-def parse_wat(text: str, *, append_halt: bool = True) -> List[Instruction]:
+def parse_wat(text: str, *, append_halt: bool = True) -> list[Instruction]:
     """Parse WAT text and return a flat List[Instruction].
 
     Args:
@@ -585,6 +584,7 @@ def parse_wat(text: str, *, append_halt: bool = True) -> List[Instruction]:
             )
         ''')
         # -> [Instruction(43, 0), Instruction(43, 1), Instruction(3, 0), Instruction(5, 0)]
+
     """
     tokens = _tokenize(text)
     if not tokens:
@@ -618,7 +618,8 @@ def parse_wat(text: str, *, append_halt: bool = True) -> List[Instruction]:
 # ─── Self-test ────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    from .isa import program as _prog, OP_PUSH, OP_ADD, OP_LOCAL_GET
+    from .isa import OP_ADD, OP_LOCAL_GET, OP_PUSH
+    from .isa import program as _prog
 
     print("=== WAT Parser Self-Test ===\n")
     passed = 0
