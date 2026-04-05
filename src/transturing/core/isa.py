@@ -16,11 +16,14 @@ live in transturing.backends.torch_backend.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .abc import ExecutorBackend
+
+logger = logging.getLogger(__name__)
 
 # ─── Types ──────────────────────────────────────────────────────────
 
@@ -116,13 +119,13 @@ def program(*instrs: Instruction | WasmInstr) -> list[Instruction]:
             continue
         name = instr[0].upper()
         # Handle three WasmInstr shapes: (op,), (op, arg), (op, labels, default)
-        if len(instr) == 3:  # noqa: PLR2004
-            # BR_TABLE shape: ("BR_TABLE", [labels...], default)
-            arg = instr[2]
-        elif len(instr) == 2:  # noqa: PLR2004
-            arg = instr[1]
-        else:
-            arg = 0
+        match instr:
+            case (_, _, default):
+                arg = default
+            case (_, a):
+                arg = a
+            case _:
+                arg = 0
         op = _name_to_op[name]
         result.append(Instruction(op, arg))
     return result
@@ -522,6 +525,18 @@ NONLINEAR_OPS = {
 
 MASK32 = 0xFFFFFFFF
 
+# Named constants for i32/i16/i8 bit manipulation (avoids PLR2004 violations)
+I32_SIGN_BIT = 0x80000000
+I32_MODULO = 0x100000000
+I8_SIGN_BIT = 0x80
+I8_RANGE = 0x100
+I16_SIGN_BIT = 0x8000
+I16_RANGE = 0x10000
+
+# CLZ threshold table — avoids inline magic numbers in clz32()
+_CLZ_THRESHOLDS = [0x0000FFFF, 0x00FFFFFF, 0x0FFFFFFF, 0x3FFFFFFF, 0x7FFFFFFF]
+_CLZ_SHIFTS = [16, 8, 4, 2, 1]
+
 
 def trunc_div(b: int, a: int) -> int:
     """Signed integer division truncating toward zero (WASM semantics)."""
@@ -546,8 +561,8 @@ def shr_u(b: int, a: int) -> int:
 def shr_s(b: int, a: int) -> int:
     """Arithmetic (signed) right shift of b by a positions."""
     val = to_i32(b)
-    if val >= 0x80000000:  # noqa: PLR2004
-        val -= 0x100000000
+    if val >= I32_SIGN_BIT:
+        val -= I32_MODULO
     shift = int(a) & 31
     result = val >> shift
     return result & MASK32 if result < 0 else result
@@ -573,20 +588,10 @@ def clz32(val: int) -> int:
     if v == 0:
         return 32
     n = 0
-    if v <= 0x0000FFFF:  # noqa: PLR2004
-        n += 16
-        v <<= 16
-    if v <= 0x00FFFFFF:  # noqa: PLR2004
-        n += 8
-        v <<= 8
-    if v <= 0x0FFFFFFF:  # noqa: PLR2004
-        n += 4
-        v <<= 4
-    if v <= 0x3FFFFFFF:  # noqa: PLR2004
-        n += 2
-        v <<= 2
-    if v <= 0x7FFFFFFF:  # noqa: PLR2004
-        n += 1
+    for threshold, shift in zip(_CLZ_THRESHOLDS, _CLZ_SHIFTS, strict=True):
+        if v <= threshold:
+            n += shift
+            v <<= shift
     return n
 
 
@@ -621,16 +626,28 @@ def popcnt32(val: int) -> int:
 def sign_extend_8(val: int) -> int:
     """Sign-extend an 8-bit value to a signed integer."""
     v = int(val) & 0xFF
-    return v - 0x100 if v >= 0x80 else v  # noqa: PLR2004
+    return v - I8_RANGE if v >= I8_SIGN_BIT else v
 
 
 def sign_extend_16(val: int) -> int:
     """Sign-extend a 16-bit value to a signed integer."""
     v = int(val) & 0xFFFF
-    return v - 0x10000 if v >= 0x8000 else v  # noqa: PLR2004
+    return v - I16_RANGE if v >= I16_SIGN_BIT else v
 
 
 # ─── Test Utilities ────────────────────────────────────────────────
+
+
+@dataclass
+class TestConfig:
+    """Configuration bundle for test_algorithm / test_trap_algorithm."""
+
+    name: str
+    prog: list[Instruction]
+    expected: int | None
+    np_exec: ExecutorBackend
+    pt_exec: ExecutorBackend
+    verbose: bool = False
 
 
 def compare_traces(trace_a: Trace, trace_b: Trace) -> tuple[bool, str]:
@@ -643,56 +660,50 @@ def compare_traces(trace_a: Trace, trace_b: Trace) -> tuple[bool, str]:
     return True, "match"
 
 
-def test_algorithm(  # noqa: PLR0913
-    name: str,
-    prog: list[Instruction],
-    expected: int | None,
-    np_exec: ExecutorBackend,
-    pt_exec: ExecutorBackend,
-    *,
-    verbose: bool = False,  # noqa: PT028
-) -> tuple[bool, int]:
+def test_algorithm(cfg: TestConfig) -> tuple[bool, int]:
     """Run an algorithm on both executors and verify."""
-    np_trace = np_exec.execute(prog)
-    pt_trace = pt_exec.execute(prog)
+    np_trace = cfg.np_exec.execute(cfg.prog)
+    pt_trace = cfg.pt_exec.execute(cfg.prog)
 
     np_top = np_trace.steps[-1].top if np_trace.steps else None
     pt_top = pt_trace.steps[-1].top if pt_trace.steps else None
     match, detail = compare_traces(np_trace, pt_trace)
 
-    np_ok = np_top == expected
-    pt_ok = pt_top == expected
+    np_ok = np_top == cfg.expected
+    pt_ok = pt_top == cfg.expected
     all_ok = np_ok and pt_ok and match
 
     status = "PASS" if all_ok else "FAIL"
-    print(  # noqa: T201
-        f"  {status}  {name:30s}  expected={expected:>6}  "
-        f"numpy={np_top:>6}  torch={pt_top:>6}  "
-        f"steps={len(np_trace.steps):>4}  trace_match={'Y' if match else 'N'}",
+    logger.info(
+        "  %s  %-30s  expected=%6s  numpy=%6s  torch=%6s  steps=%4d  trace_match=%s",
+        status,
+        cfg.name,
+        cfg.expected,
+        np_top,
+        pt_top,
+        len(np_trace.steps),
+        "Y" if match else "N",
     )
 
-    if not all_ok and verbose:
+    if not all_ok and cfg.verbose:
         if not match:
-            print(f"         Trace mismatch: {detail}")  # noqa: T201
+            logger.info("         Trace mismatch: %s", detail)
         if not np_ok:
-            print(f"         NumPy wrong: got {np_top}, expected {expected}")  # noqa: T201
+            logger.info(
+                "         NumPy wrong: got %s, expected %s", np_top, cfg.expected
+            )
         if not pt_ok:
-            print(f"         PyTorch wrong: got {pt_top}, expected {expected}")  # noqa: T201
+            logger.info(
+                "         PyTorch wrong: got %s, expected %s", pt_top, cfg.expected
+            )
 
     return all_ok, len(np_trace.steps)
 
 
-def test_trap_algorithm(
-    name: str,
-    prog: list[Instruction],
-    np_exec: ExecutorBackend,
-    pt_exec: ExecutorBackend,
-    *,
-    verbose: bool = False,  # noqa: PT028
-) -> bool:
+def test_trap_algorithm(cfg: TestConfig) -> bool:
     """Run a program expected to TRAP on both executors. Returns True if both trap."""
-    np_trace = np_exec.execute(prog)
-    pt_trace = pt_exec.execute(prog)
+    np_trace = cfg.np_exec.execute(cfg.prog)
+    pt_trace = cfg.pt_exec.execute(cfg.prog)
 
     np_trapped: bool = len(np_trace.steps) > 0 and np_trace.steps[-1].op == OP_TRAP
     pt_trapped: bool = len(pt_trace.steps) > 0 and pt_trace.steps[-1].op == OP_TRAP
@@ -710,17 +721,21 @@ def test_trap_algorithm(
         if pt_trapped
         else f"top={pt_trace.steps[-1].top if pt_trace.steps else '?'}"
     )
-    print(  # noqa: T201
-        f"  {status}  {name:30s}  numpy={np_label:>10}  torch={pt_label:>10}  "
-        f"trace_match={'Y' if match else 'N'}",
+    logger.info(
+        "  %s  %-30s  numpy=%10s  torch=%10s  trace_match=%s",
+        status,
+        cfg.name,
+        np_label,
+        pt_label,
+        "Y" if match else "N",
     )
 
-    if not all_ok and verbose:
+    if not all_ok and cfg.verbose:
         if not np_trapped:
-            print("         NumPy did not trap")  # noqa: T201
+            logger.info("         NumPy did not trap")
         if not pt_trapped:
-            print("         PyTorch did not trap")  # noqa: T201
+            logger.info("         PyTorch did not trap")
         if not match:
-            print(f"         Trace mismatch: {detail}")  # noqa: T201
+            logger.info("         Trace mismatch: %s", detail)
 
     return all_ok

@@ -1,4 +1,3 @@
-# ruff: noqa: S101
 """
 Verify NumPy and PyTorch backends produce expected results.
 

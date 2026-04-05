@@ -10,7 +10,7 @@ Contains:
   - TorchExecutor: executes programs via CompiledModel
 """
 
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import torch
 from torch import nn
@@ -124,6 +124,70 @@ from transturing.core.registry import register_backend
 DTYPE = torch.float64
 EPS = 1e-6
 
+# ─── Memory embedding container ──────────────────────────────────
+
+_MemoryEmbs = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+"""(stack, local, heap, call) embedding tensors."""
+
+
+# ─── Opcode dispatch sets ────────────────────────────────────────
+
+_PUSH_RESULT_OPS: frozenset[int] = frozenset(
+    {
+        OP_PUSH,
+        OP_DUP,
+        OP_OVER,
+        OP_ADD,
+        OP_SUB,
+        OP_MUL,
+        OP_DIV_S,
+        OP_DIV_U,
+        OP_REM_S,
+        OP_REM_U,
+        OP_EQ,
+        OP_NE,
+        OP_LT_S,
+        OP_LT_U,
+        OP_GT_S,
+        OP_GT_U,
+        OP_LE_S,
+        OP_LE_U,
+        OP_GE_S,
+        OP_GE_U,
+        OP_AND,
+        OP_OR,
+        OP_XOR,
+        OP_SHL,
+        OP_SHR_S,
+        OP_SHR_U,
+        OP_ROTL,
+        OP_ROTR,
+        OP_EQZ,
+        OP_CLZ,
+        OP_CTZ,
+        OP_POPCNT,
+        OP_ABS,
+        OP_NEG,
+        OP_SELECT,
+        OP_LOCAL_GET,
+        OP_I32_LOAD,
+        OP_I32_LOAD8_U,
+        OP_I32_LOAD8_S,
+        OP_I32_LOAD16_U,
+        OP_I32_LOAD16_S,
+    }
+)
+
+_LOCAL_WRITE_OPS: frozenset[int] = frozenset({OP_LOCAL_SET, OP_LOCAL_TEE})
+
+_I32_STORE_MASKS: dict[int, int] = {
+    OP_I32_STORE: MASK32,
+    OP_I32_STORE8: 0xFF,
+    OP_I32_STORE16: 0xFFFF,
+}
+
+_DIV_OPS: frozenset[int] = frozenset({OP_DIV_S, OP_DIV_U, OP_REM_S, OP_REM_U})
+
 
 # ─── Compiled Attention Head ──────────────────────────────────────
 
@@ -226,44 +290,68 @@ class TokenVocab:
 
     _MAX_BYTE_VALUE: ClassVar[int] = 255
 
-    def encode(self, token: str | tuple[str, int | str]) -> int:  # noqa: C901, PLR0912
+    def encode(self, token: str | tuple[str, int | str]) -> int:
         """Encode a token to its vocabulary ID."""
         if isinstance(token, str):
-            if token in self._SPECIAL_IDS:
-                return self._SPECIAL_IDS[token]
-            msg = f"Unknown special token: {token!r}"
-            raise ValueError(msg)
+            return self._encode_special_str(token)
         tag, val = token
+        return self._encode_tagged(tag, val)
+
+    def _encode_special_str(self, token: str) -> int:
+        """Encode a bare string token (special token name)."""
+        if token in self._SPECIAL_IDS:
+            return self._SPECIAL_IDS[token]
+        msg = f"Unknown special token: {token!r}"
+        raise ValueError(msg)
+
+    def _encode_tagged(self, tag: str, val: int | str) -> int:
+        """Dispatch a tagged token to the appropriate encoder."""
         if tag == self.OPCODE:
-            if not isinstance(val, int):
-                msg = f"Opcode value must be int, got {type(val).__name__}"
-                raise ValueError(msg)
-            if val not in self._opcode_to_tid:
-                msg = f"Unknown opcode: {val}"
-                raise ValueError(msg)
-            return self._opcode_to_tid[val]
+            return self._encode_opcode(val)
         if tag == self.VALUE:
-            if not isinstance(val, int):
-                msg = f"Value must be int, got {type(val).__name__}"
-                raise ValueError(msg)
-            if not (0 <= val <= self._MAX_BYTE_VALUE):
-                msg = f"Value out of byte range: {val}"
-                raise ValueError(msg)
-            return self._VALUE_BASE + val
+            return self._encode_value(val)
         if tag == self.SP_DELTA:
-            if not isinstance(val, int):
-                msg = f"SP delta must be int, got {type(val).__name__}"
-                raise ValueError(msg)
-            if not (self._SP_DELTA_MIN <= val <= self._SP_DELTA_MAX):
-                msg = f"SP delta {val} out of range"
-                raise ValueError(msg)
-            return self._SP_DELTA_BASE + (val - self._SP_DELTA_MIN)
+            return self._encode_sp_delta(val)
         if tag == self.SPECIAL:
-            if isinstance(val, str) and val in self._SPECIAL_IDS:
-                return self._SPECIAL_IDS[val]
-            msg = f"Unknown special token: {val!r}"
-            raise ValueError(msg)
+            return self._encode_special_val(val)
         msg = f"Unknown token tag: {tag!r}"
+        raise ValueError(msg)
+
+    def _encode_opcode(self, val: int | str) -> int:
+        """Encode an opcode token to its vocabulary ID."""
+        if not isinstance(val, int):
+            msg = f"Opcode value must be int, got {type(val).__name__}"
+            raise TypeError(msg)
+        if val not in self._opcode_to_tid:
+            msg = f"Unknown opcode: {val}"
+            raise ValueError(msg)
+        return self._opcode_to_tid[val]
+
+    def _encode_value(self, val: int | str) -> int:
+        """Encode a byte value token to its vocabulary ID."""
+        if not isinstance(val, int):
+            msg = f"Value must be int, got {type(val).__name__}"
+            raise TypeError(msg)
+        if not (0 <= val <= self._MAX_BYTE_VALUE):
+            msg = f"Value out of byte range: {val}"
+            raise ValueError(msg)
+        return self._VALUE_BASE + val
+
+    def _encode_sp_delta(self, val: int | str) -> int:
+        """Encode an SP delta token to its vocabulary ID."""
+        if not isinstance(val, int):
+            msg = f"SP delta must be int, got {type(val).__name__}"
+            raise TypeError(msg)
+        if not (self._SP_DELTA_MIN <= val <= self._SP_DELTA_MAX):
+            msg = f"SP delta {val} out of range"
+            raise ValueError(msg)
+        return self._SP_DELTA_BASE + (val - self._SP_DELTA_MIN)
+
+    def _encode_special_val(self, val: int | str) -> int:
+        """Encode a special token passed as tuple ('special', name)."""
+        if isinstance(val, str) and val in self._SPECIAL_IDS:
+            return self._SPECIAL_IDS[val]
+        msg = f"Unknown special token: {val!r}"
         raise ValueError(msg)
 
     def decode(self, tid: int) -> tuple[str, int | str]:
@@ -326,7 +414,6 @@ class TokenVocab:
             d_model = D_MODEL
         if embedding is None:
             embedding = self.compile_embedding(d_model)
-        assert embedding is not None  # noqa: S101 - type narrowing after assignment
         e = embedding.weight.data
         unembed = nn.Linear(d_model, self.vocab_size, bias=True)
         norms_sq = (e * e).sum(dim=1)
@@ -343,7 +430,9 @@ class TokenVocab:
         tag, val = self.decode(tid)
         if tag == self.SPECIAL:
             return str(val)
-        assert isinstance(val, int)  # noqa: S101 - type narrowing after tag check
+        if not isinstance(val, int):
+            msg = f"Expected int value for tag {tag!r}"
+            raise TypeError(msg)
         if tag == self.OPCODE:
             return self.opcode_name(val)
         if tag == self.VALUE:
@@ -481,146 +570,132 @@ class CompiledModel(nn.Module):
 
         self._compile_weights()
 
-    def _compile_weights(self) -> None:  # noqa: PLR0915
+    def _compile_head(
+        self,
+        head: CompiledAttentionHead,
+        qkv: tuple[
+            list[list[tuple[int, float]]],
+            list[list[tuple[int, float]]],
+            list[list[tuple[int, float]]],
+        ],
+        q_bias: list[float] | None = None,
+    ) -> None:
+        """Set attention head weights from per-row (dim, value) specifications."""
+        q_rows, k_rows, v_rows = qkv
+        d_model = self.d_model
+        w_q = torch.zeros(len(q_rows), d_model)
+        for row, entries in enumerate(q_rows):
+            for dim, val in entries:
+                w_q[row, dim] = val
+        head.W_Q.weight.copy_(w_q)
+
+        w_k = torch.zeros(len(k_rows), d_model)
+        for row, entries in enumerate(k_rows):
+            for dim, val in entries:
+                w_k[row, dim] = val
+        head.W_K.weight.copy_(w_k)
+
+        w_v = torch.zeros(len(v_rows), d_model)
+        for row, entries in enumerate(v_rows):
+            for dim, val in entries:
+                w_v[row, dim] = val
+        head.W_V.weight.copy_(w_v)
+
+        if q_bias is not None:
+            b = torch.zeros(len(q_bias))
+            for i, val in enumerate(q_bias):
+                b[i] = val
+            head.W_Q.bias.copy_(b)
+
+    def _compile_heads(self) -> None:
+        """Compile all 10 attention head weights."""
+        # Heads 0-1: Program memory (opcode + argument fetch)
+        for head in (self.head_prog_op, self.head_prog_arg):
+            self._compile_head(
+                head,
+                (
+                    [[(DIM_IP, 1.0)], [(DIM_ONE, 1.0)]],
+                    [[(DIM_PROG_KEY_0, 1.0)], [(DIM_PROG_KEY_1, 1.0)]],
+                    [[(DIM_OPCODE if head is self.head_prog_op else DIM_VALUE, 1.0)]],
+                ),
+            )
+
+        # Head 2: Stack read at SP
+        self._compile_head(
+            self.head_stack_a,
+            (
+                [[(DIM_SP, 1.0)], [(DIM_ONE, 1.0)]],
+                [[(DIM_STACK_KEY_0, 1.0)], [(DIM_STACK_KEY_1, 1.0)]],
+                [[(DIM_VALUE, 1.0)]],
+            ),
+        )
+        # Head 3: Stack read at SP-1 (bias shifts query by -1)
+        self._compile_head(
+            self.head_stack_b,
+            (
+                [[(DIM_SP, 1.0)], [(DIM_ONE, 1.0)]],
+                [[(DIM_STACK_KEY_0, 1.0)], [(DIM_STACK_KEY_1, 1.0)]],
+                [[(DIM_VALUE, 1.0)]],
+            ),
+            q_bias=[-1.0, 0.0],
+        )
+        # Head 4: Stack read at SP-2 (bias shifts query by -2)
+        self._compile_head(
+            self.head_stack_c,
+            (
+                [[(DIM_SP, 1.0)], [(DIM_ONE, 1.0)]],
+                [[(DIM_STACK_KEY_0, 1.0)], [(DIM_STACK_KEY_1, 1.0)]],
+                [[(DIM_VALUE, 1.0)]],
+            ),
+            q_bias=[-2.0, 0.0],
+        )
+
+        # Heads 5-6: Local variable (value + address verify)
+        for head, v_spec in (
+            (self.head_local_val, [[(DIM_VALUE, 1.0)]]),
+            (self.head_local_addr, [[(DIM_LOCAL_KEY_0, 0.5)]]),
+        ):
+            self._compile_head(
+                head,
+                (
+                    [[(DIM_VALUE, 1.0)], [(DIM_ONE, 1.0)]],
+                    [[(DIM_LOCAL_KEY_0, 1.0)], [(DIM_LOCAL_KEY_1, 1.0)]],
+                    v_spec,
+                ),
+            )
+
+        # Heads 7-8: Heap memory (value + address verify)
+        for head, v_spec in (
+            (self.head_heap_val, [[(DIM_VALUE, 1.0)]]),
+            (self.head_heap_addr, [[(DIM_HEAP_KEY_0, 0.5)]]),
+        ):
+            self._compile_head(
+                head,
+                (
+                    [[(DIM_VALUE, 1.0)], [(DIM_ONE, 1.0)]],
+                    [[(DIM_HEAP_KEY_0, 1.0)], [(DIM_HEAP_KEY_1, 1.0)]],
+                    v_spec,
+                ),
+            )
+
+        # Head 9: Call stack read (3-dim value output)
+        self._compile_head(
+            self.head_call_stack,
+            (
+                [[(DIM_VALUE, 1.0)], [(DIM_ONE, 1.0)]],
+                [[(DIM_CALL_KEY_0, 1.0)], [(DIM_CALL_KEY_1, 1.0)]],
+                [
+                    [(DIM_CALL_RET_ADDR, 1.0)],
+                    [(DIM_CALL_SAVED_SP, 1.0)],
+                    [(DIM_CALL_LOCALS_BASE, 1.0)],
+                ],
+            ),
+        )
+
+    def _compile_weights(self) -> None:
         """Set all weight matrices analytically."""
         with torch.no_grad():
-            # ── Head 0: Program opcode fetch ──
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_IP] = 1.0
-            w[1, DIM_ONE] = 1.0
-            self.head_prog_op.W_Q.weight.copy_(w)
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_PROG_KEY_0] = 1.0
-            w[1, DIM_PROG_KEY_1] = 1.0
-            self.head_prog_op.W_K.weight.copy_(w)
-            w = torch.zeros(1, self.d_model)
-            w[0, DIM_OPCODE] = 1.0
-            self.head_prog_op.W_V.weight.copy_(w)
-
-            # ── Head 1: Program argument fetch ──
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_IP] = 1.0
-            w[1, DIM_ONE] = 1.0
-            self.head_prog_arg.W_Q.weight.copy_(w)
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_PROG_KEY_0] = 1.0
-            w[1, DIM_PROG_KEY_1] = 1.0
-            self.head_prog_arg.W_K.weight.copy_(w)
-            w = torch.zeros(1, self.d_model)
-            w[0, DIM_VALUE] = 1.0
-            self.head_prog_arg.W_V.weight.copy_(w)
-
-            # ── Head 2: Stack read at SP ──
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_SP] = 1.0
-            w[1, DIM_ONE] = 1.0
-            self.head_stack_a.W_Q.weight.copy_(w)
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_STACK_KEY_0] = 1.0
-            w[1, DIM_STACK_KEY_1] = 1.0
-            self.head_stack_a.W_K.weight.copy_(w)
-            w = torch.zeros(1, self.d_model)
-            w[0, DIM_VALUE] = 1.0
-            self.head_stack_a.W_V.weight.copy_(w)
-
-            # ── Head 3: Stack read at SP-1 ──
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_SP] = 1.0
-            w[1, DIM_ONE] = 1.0
-            self.head_stack_b.W_Q.weight.copy_(w)
-            b = torch.zeros(2)
-            b[0] = -1.0
-            self.head_stack_b.W_Q.bias.copy_(b)
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_STACK_KEY_0] = 1.0
-            w[1, DIM_STACK_KEY_1] = 1.0
-            self.head_stack_b.W_K.weight.copy_(w)
-            w = torch.zeros(1, self.d_model)
-            w[0, DIM_VALUE] = 1.0
-            self.head_stack_b.W_V.weight.copy_(w)
-
-            # ── Head 4: Stack read at SP-2 ──
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_SP] = 1.0
-            w[1, DIM_ONE] = 1.0
-            self.head_stack_c.W_Q.weight.copy_(w)
-            b = torch.zeros(2)
-            b[0] = -2.0
-            self.head_stack_c.W_Q.bias.copy_(b)
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_STACK_KEY_0] = 1.0
-            w[1, DIM_STACK_KEY_1] = 1.0
-            self.head_stack_c.W_K.weight.copy_(w)
-            w = torch.zeros(1, self.d_model)
-            w[0, DIM_VALUE] = 1.0
-            self.head_stack_c.W_V.weight.copy_(w)
-
-            # ── Head 5: Local value fetch ──
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_VALUE] = 1.0
-            w[1, DIM_ONE] = 1.0
-            self.head_local_val.W_Q.weight.copy_(w)
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_LOCAL_KEY_0] = 1.0
-            w[1, DIM_LOCAL_KEY_1] = 1.0
-            self.head_local_val.W_K.weight.copy_(w)
-            w = torch.zeros(1, self.d_model)
-            w[0, DIM_VALUE] = 1.0
-            self.head_local_val.W_V.weight.copy_(w)
-
-            # ── Head 6: Local address verify ──
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_VALUE] = 1.0
-            w[1, DIM_ONE] = 1.0
-            self.head_local_addr.W_Q.weight.copy_(w)
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_LOCAL_KEY_0] = 1.0
-            w[1, DIM_LOCAL_KEY_1] = 1.0
-            self.head_local_addr.W_K.weight.copy_(w)
-            w = torch.zeros(1, self.d_model)
-            w[0, DIM_LOCAL_KEY_0] = 0.5
-            self.head_local_addr.W_V.weight.copy_(w)
-
-            # ── Head 7: Heap value fetch ──
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_VALUE] = 1.0
-            w[1, DIM_ONE] = 1.0
-            self.head_heap_val.W_Q.weight.copy_(w)
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_HEAP_KEY_0] = 1.0
-            w[1, DIM_HEAP_KEY_1] = 1.0
-            self.head_heap_val.W_K.weight.copy_(w)
-            w = torch.zeros(1, self.d_model)
-            w[0, DIM_VALUE] = 1.0
-            self.head_heap_val.W_V.weight.copy_(w)
-
-            # ── Head 8: Heap address verify ──
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_VALUE] = 1.0
-            w[1, DIM_ONE] = 1.0
-            self.head_heap_addr.W_Q.weight.copy_(w)
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_HEAP_KEY_0] = 1.0
-            w[1, DIM_HEAP_KEY_1] = 1.0
-            self.head_heap_addr.W_K.weight.copy_(w)
-            w = torch.zeros(1, self.d_model)
-            w[0, DIM_HEAP_KEY_0] = 0.5
-            self.head_heap_addr.W_V.weight.copy_(w)
-
-            # ── Head 9: Call stack read ──
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_VALUE] = 1.0
-            w[1, DIM_ONE] = 1.0
-            self.head_call_stack.W_Q.weight.copy_(w)
-            w = torch.zeros(2, self.d_model)
-            w[0, DIM_CALL_KEY_0] = 1.0
-            w[1, DIM_CALL_KEY_1] = 1.0
-            self.head_call_stack.W_K.weight.copy_(w)
-            w = torch.zeros(3, self.d_model)
-            w[0, DIM_CALL_RET_ADDR] = 1.0
-            w[1, DIM_CALL_SAVED_SP] = 1.0
-            w[2, DIM_CALL_LOCALS_BASE] = 1.0
-            self.head_call_stack.W_V.weight.copy_(w)
+            self._compile_heads()
 
             # ── FF dispatch: linear routing ──
             self.M_top[0] = torch.tensor([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -727,131 +802,70 @@ class CompiledModel(nn.Module):
                 ),
             )
 
-    def forward(  # noqa: C901, PLR0913, PLR0912, PLR0915
+    def _read_stack_at(
         self,
         query_emb: torch.Tensor,
-        prog_embs: torch.Tensor,
-        stack_embs: torch.Tensor | None = None,
-        local_embs: torch.Tensor | None = None,
-        heap_embs: torch.Tensor | None = None,
-        call_embs: torch.Tensor | None = None,
-        locals_base: int = 0,
-    ) -> tuple[int, int, int, int, torch.Tensor, int, int, int, int, int]:
-        """Execute one step."""
-        if stack_embs is None:
-            stack_embs = torch.zeros(0, self.d_model, dtype=DTYPE)
-        if local_embs is None:
-            local_embs = torch.zeros(0, self.d_model, dtype=DTYPE)
-        if heap_embs is None:
-            heap_embs = torch.zeros(0, self.d_model, dtype=DTYPE)
-        if call_embs is None:
-            call_embs = torch.zeros(0, self.d_model, dtype=DTYPE)
-        assert stack_embs is not None  # noqa: S101
-        assert local_embs is not None  # noqa: S101
-        assert heap_embs is not None  # noqa: S101
-
-        opcode_val, _, _ = self.head_prog_op(query_emb, prog_embs)
-        arg_val, _, _ = self.head_prog_arg(query_emb, prog_embs)
-
-        # Head 2: Read stack[SP]
-        if stack_embs.shape[0] > 0:
-            val_a_raw, _, idx_a = self.head_stack_a(query_emb, stack_embs)
-            stored_addr_a = round(stack_embs[idx_a, DIM_STACK_KEY_0].item() / 2.0)
-            queried_sp = round(query_emb[DIM_SP].item())
-            val_a = (
-                val_a_raw[0]
-                if stored_addr_a == queried_sp
-                else torch.tensor(0.0, dtype=DTYPE)
-            )
-        else:
-            val_a = torch.tensor(0.0, dtype=DTYPE)
-
-        # Head 3: Read stack[SP-1]
-        if stack_embs.shape[0] > 0:
-            val_b_raw, _, idx_b = self.head_stack_b(query_emb, stack_embs)
-            stored_addr_b = round(stack_embs[idx_b, DIM_STACK_KEY_0].item() / 2.0)
-            queried_sp_m1 = round(query_emb[DIM_SP].item()) - 1
-            val_b = (
-                val_b_raw[0]
-                if stored_addr_b == queried_sp_m1
-                else torch.tensor(0.0, dtype=DTYPE)
-            )
-        else:
-            val_b = torch.tensor(0.0, dtype=DTYPE)
-
-        # Head 4: Read stack[SP-2]
-        if stack_embs.shape[0] > 0:
-            val_c_raw, _, idx_c = self.head_stack_c(query_emb, stack_embs)
-            stored_addr_c = round(stack_embs[idx_c, DIM_STACK_KEY_0].item() / 2.0)
-            queried_sp_m2 = round(query_emb[DIM_SP].item()) - 2
-            val_c = (
-                val_c_raw[0]
-                if stored_addr_c == queried_sp_m2
-                else torch.tensor(0.0, dtype=DTYPE)
-            )
-        else:
-            val_c = torch.tensor(0.0, dtype=DTYPE)
-
-        # Heads 5-6: Read local variable
-        arg_raw = round(arg_val[0].item())
-        actual_local_idx = locals_base + arg_raw
-        if local_embs.shape[0] > 0:
-            local_query = torch.zeros(self.d_model, dtype=DTYPE)
-            local_query[DIM_VALUE] = float(actual_local_idx)
-            local_query[DIM_ONE] = 1.0
-            local_val_raw, _, _idx_l = self.head_local_val(local_query, local_embs)
-            local_addr_raw, _, _ = self.head_local_addr(local_query, local_embs)
-            stored_local_addr = round(local_addr_raw[0].item())
-            local_val = (
-                local_val_raw[0]
-                if stored_local_addr == actual_local_idx
-                else torch.tensor(0.0, dtype=DTYPE)
-            )
-        else:
-            local_val = torch.tensor(0.0, dtype=DTYPE)
-
-        opcode = round(opcode_val[0].item())
-        arg = arg_raw
-
-        # Heads 7-8: Read heap memory
-        heap_query_addr = round(val_a.item())
-        if heap_embs.shape[0] > 0:
-            heap_query = torch.zeros(self.d_model, dtype=DTYPE)
-            heap_query[DIM_VALUE] = float(heap_query_addr)
-            heap_query[DIM_ONE] = 1.0
-            heap_val_raw, _, _idx_h = self.head_heap_val(heap_query, heap_embs)
-            heap_addr_raw, _, _ = self.head_heap_addr(heap_query, heap_embs)
-            stored_heap_addr = round(heap_addr_raw[0].item())
-            heap_val = (
-                heap_val_raw[0]
-                if stored_heap_addr == heap_query_addr
-                else torch.tensor(0.0, dtype=DTYPE)
-            )
-        else:
-            heap_val = torch.tensor(0.0, dtype=DTYPE)
-
-        # FF Dispatch — linear path
-        opcode_one_hot = torch.zeros(N_OPCODES, dtype=DTYPE)
-        idx = OPCODE_IDX.get(opcode, -1)
-        if idx >= 0:
-            opcode_one_hot[idx] = 1.0
-
-        values = torch.stack(
-            [
-                torch.tensor(float(arg), dtype=DTYPE),
-                val_a,
-                val_b,
-                val_c,
-                local_val,
-                heap_val,
-            ],
+        stack_embs: torch.Tensor,
+        head: CompiledAttentionHead,
+        sp_offset: int,
+    ) -> torch.Tensor:
+        """Read stack value at SP + sp_offset using the given attention head."""
+        if stack_embs.shape[0] == 0:
+            return torch.tensor(0.0, dtype=DTYPE)
+        val_raw, _, idx = head(query_emb, stack_embs)
+        stored_addr = round(stack_embs[idx, DIM_STACK_KEY_0].item() / 2.0)
+        queried_addr = round(query_emb[DIM_SP].item()) + sp_offset
+        return (
+            val_raw[0]
+            if stored_addr == queried_addr
+            else torch.tensor(0.0, dtype=DTYPE)
         )
-        candidates = self.M_top @ values
-        top_linear = (opcode_one_hot * candidates).sum()
 
-        # FF Dispatch — nonlinear path
-        va = round(val_a.item())
-        vb = round(val_b.item())
+    def _read_local(
+        self,
+        local_embs: torch.Tensor,
+        actual_local_idx: int,
+    ) -> torch.Tensor:
+        """Read local variable value at the given index."""
+        if local_embs.shape[0] == 0:
+            return torch.tensor(0.0, dtype=DTYPE)
+        local_query = torch.zeros(self.d_model, dtype=DTYPE)
+        local_query[DIM_VALUE] = float(actual_local_idx)
+        local_query[DIM_ONE] = 1.0
+        local_val_raw, _, _ = self.head_local_val(local_query, local_embs)
+        local_addr_raw, _, _ = self.head_local_addr(local_query, local_embs)
+        stored_addr = round(local_addr_raw[0].item())
+        return (
+            local_val_raw[0]
+            if stored_addr == actual_local_idx
+            else torch.tensor(0.0, dtype=DTYPE)
+        )
+
+    def _read_heap(self, val_a: torch.Tensor, heap_embs: torch.Tensor) -> torch.Tensor:
+        """Read heap value at the address encoded in val_a."""
+        heap_query_addr = round(val_a.item())
+        if heap_embs.shape[0] == 0:
+            return torch.tensor(0.0, dtype=DTYPE)
+        heap_query = torch.zeros(self.d_model, dtype=DTYPE)
+        heap_query[DIM_VALUE] = float(heap_query_addr)
+        heap_query[DIM_ONE] = 1.0
+        heap_val_raw, _, _ = self.head_heap_val(heap_query, heap_embs)
+        heap_addr_raw, _, _ = self.head_heap_addr(heap_query, heap_embs)
+        stored_addr = round(heap_addr_raw[0].item())
+        return (
+            heap_val_raw[0]
+            if stored_addr == heap_query_addr
+            else torch.tensor(0.0, dtype=DTYPE)
+        )
+
+    @staticmethod
+    def _compute_nonlinear(
+        va: int,
+        vb: int,
+        vc: int,
+        hv: int,
+    ) -> torch.Tensor:
+        """Compute nonlinear dispatch results for all opcodes."""
         nonlinear = torch.zeros(N_OPCODES, dtype=DTYPE)
 
         nonlinear[OPCODE_IDX[OP_ADD]] = float((va + vb) & MASK32)
@@ -887,15 +901,64 @@ class CompiledModel(nn.Module):
         nonlinear[OPCODE_IDX[OP_POPCNT]] = float(popcnt32(va))
         nonlinear[OPCODE_IDX[OP_ABS]] = float(abs(int(va)))
         nonlinear[OPCODE_IDX[OP_NEG]] = float((-int(va)) & MASK32)
-
-        vc = round(val_c.item())
         nonlinear[OPCODE_IDX[OP_SELECT]] = float(vc if va != 0 else vb)
 
-        hv = round(heap_val.item())
         nonlinear[OPCODE_IDX[OP_I32_LOAD8_U]] = float(int(hv) & 0xFF)
         nonlinear[OPCODE_IDX[OP_I32_LOAD8_S]] = float(sign_extend_8(hv))
         nonlinear[OPCODE_IDX[OP_I32_LOAD16_U]] = float(int(hv) & 0xFFFF)
         nonlinear[OPCODE_IDX[OP_I32_LOAD16_S]] = float(sign_extend_16(hv))
+
+        return nonlinear
+
+    def forward(
+        self,
+        query_emb: torch.Tensor,
+        prog_embs: torch.Tensor,
+        mem: _MemoryEmbs,
+        locals_base: int = 0,
+    ) -> tuple[int, int, int, int, torch.Tensor, int, int, int, int, int]:
+        """Execute one step."""
+        stack_embs, local_embs, heap_embs, _call_embs = mem
+
+        opcode_val, _, _ = self.head_prog_op(query_emb, prog_embs)
+        arg_val, _, _ = self.head_prog_arg(query_emb, prog_embs)
+
+        val_a = self._read_stack_at(query_emb, stack_embs, self.head_stack_a, 0)
+        val_b = self._read_stack_at(query_emb, stack_embs, self.head_stack_b, -1)
+        val_c = self._read_stack_at(query_emb, stack_embs, self.head_stack_c, -2)
+
+        arg_raw = round(arg_val[0].item())
+        actual_local_idx = locals_base + arg_raw
+        local_val = self._read_local(local_embs, actual_local_idx)
+
+        opcode = round(opcode_val[0].item())
+        heap_val = self._read_heap(val_a, heap_embs)
+
+        # FF Dispatch — linear path
+        opcode_one_hot = torch.zeros(N_OPCODES, dtype=DTYPE)
+        idx = OPCODE_IDX.get(opcode, -1)
+        if idx >= 0:
+            opcode_one_hot[idx] = 1.0
+
+        values = torch.stack(
+            [
+                torch.tensor(float(arg_raw), dtype=DTYPE),
+                val_a,
+                val_b,
+                val_c,
+                local_val,
+                heap_val,
+            ]
+        )
+        candidates = self.M_top @ values
+        top_linear = (opcode_one_hot * candidates).sum()
+
+        # FF Dispatch — nonlinear path
+        va = round(val_a.item())
+        vb = round(val_b.item())
+        vc = round(val_c.item())
+        hv = round(heap_val.item())
+        nonlinear = self._compute_nonlinear(va, vb, vc, hv)
 
         top_nonlinear = (opcode_one_hot * nonlinear).sum()
         top = top_linear + top_nonlinear
@@ -903,16 +966,54 @@ class CompiledModel(nn.Module):
 
         return (
             opcode,
-            arg,
+            arg_raw,
             int(sp_delta.item()),
             round(top.item()),
             opcode_one_hot,
-            round(val_a.item()),
-            round(val_b.item()),
-            round(val_c.item()),
+            va,
+            vb,
+            vc,
             round(local_val.item()),
-            round(heap_val.item()),
+            hv,
         )
+
+
+# ─── Executor helpers ─────────────────────────────────────────────
+
+
+def _stack_or_empty(embs: list[torch.Tensor]) -> torch.Tensor:
+    """Stack a list of tensors, or return an empty tensor of correct shape."""
+    return torch.stack(embs) if embs else torch.zeros(0, D_MODEL, dtype=DTYPE)
+
+
+class _ForwardResult(NamedTuple):
+    """Results from a single model forward pass used by the executor."""
+
+    opcode: int
+    arg: int
+    sp_delta: int
+    top: int
+    val_a: int
+    val_b: int
+    val_c: int
+
+
+class _ExecState:
+    """Mutable execution state for the interpreter loop."""
+
+    def __init__(self) -> None:
+        self.stack_embs: list[torch.Tensor] = []
+        self.local_embs: list[torch.Tensor] = []
+        self.heap_embs: list[torch.Tensor] = []
+        self.call_embs: list[torch.Tensor] = []
+        self.write_count: int = 0
+        self.local_write_count: int = 0
+        self.heap_write_count: int = 0
+        self.call_write_count: int = 0
+        self.call_stack: list[tuple[int, int, int]] = []
+        self.locals_base: int = 0
+        self.ip: int = 0
+        self.sp: int = 0
 
 
 # ─── PyTorch Executor ────────────────────────────────────────────
@@ -929,219 +1030,183 @@ class TorchExecutor(ExecutorBackend):
         self.model = model or CompiledModel()
         self.model.eval()
 
-    def execute(self, prog: list[Instruction], max_steps: int = 50000) -> Trace:  # noqa: C901, PLR0912, PLR0915
+    def execute(self, prog: list[Instruction], max_steps: int = 50000) -> Trace:
         """Execute a program and return the execution trace."""
         trace = Trace(program=prog)
 
         prog_embs = torch.stack(
             [embed_program_token(i, instr) for i, instr in enumerate(prog)],
         )
-
-        stack_embs_list: list[torch.Tensor] = []
-        local_embs_list: list[torch.Tensor] = []
-        heap_embs_list: list[torch.Tensor] = []
-        call_embs_list: list[torch.Tensor] = []
-        write_count = 0
-        local_write_count = 0
-        heap_write_count = 0
-        call_write_count = 0
-        call_stack: list[tuple[int, int, int]] = []
-        locals_base = 0
-        ip = 0
-        sp = 0
+        state = _ExecState()
 
         with torch.no_grad():
             for _step in range(max_steps):
-                if ip >= len(prog):
+                if state.ip >= len(prog):
                     break
 
-                query = embed_state(ip, sp)
-                stack_embs = (
-                    torch.stack(stack_embs_list)
-                    if stack_embs_list
-                    else torch.zeros(0, D_MODEL, dtype=DTYPE)
-                )
-                local_embs = (
-                    torch.stack(local_embs_list)
-                    if local_embs_list
-                    else torch.zeros(0, D_MODEL, dtype=DTYPE)
-                )
-                heap_embs = (
-                    torch.stack(heap_embs_list)
-                    if heap_embs_list
-                    else torch.zeros(0, D_MODEL, dtype=DTYPE)
-                )
-                call_embs = (
-                    torch.stack(call_embs_list)
-                    if call_embs_list
-                    else torch.zeros(0, D_MODEL, dtype=DTYPE)
-                )
+                query = embed_state(state.ip, state.sp)
+                mem = self._build_mem(state)
+                fwd = self._forward_step(query, prog_embs, mem, state.locals_base)
 
-                (
-                    opcode,
-                    arg,
-                    sp_delta,
-                    top,
-                    _,
-                    val_a,
-                    val_b,
-                    val_c,
-                    _local_val,
-                    _heap_val,
-                ) = self.model.forward(
-                    query,
-                    prog_embs,
-                    stack_embs,
-                    local_embs,
-                    heap_embs,
-                    call_embs,
-                    locals_base,
-                )
-
-                if opcode == OP_HALT:
-                    trace.steps.append(TraceStep(opcode, arg, sp, top))
+                if fwd.opcode == OP_HALT:
+                    trace.steps.append(
+                        TraceStep(fwd.opcode, fwd.arg, state.sp, fwd.top),
+                    )
                     break
 
-                if opcode in (OP_DIV_S, OP_DIV_U, OP_REM_S, OP_REM_U) and val_a == 0:
-                    trace.steps.append(TraceStep(OP_TRAP, 0, sp, 0))
+                if fwd.opcode in _DIV_OPS and fwd.val_a == 0:
+                    trace.steps.append(TraceStep(OP_TRAP, 0, state.sp, 0))
                     break
 
-                cond_val = None
-                if opcode in (OP_JZ, OP_JNZ):
-                    cond_val = val_a
-
-                new_sp = sp + sp_delta
-
-                if (
-                    opcode in (OP_PUSH, OP_DUP, OP_OVER)
-                    or opcode
-                    in (
-                        OP_ADD,
-                        OP_SUB,
-                        OP_MUL,
-                        OP_DIV_S,
-                        OP_DIV_U,
-                        OP_REM_S,
-                        OP_REM_U,
-                        OP_EQ,
-                        OP_NE,
-                        OP_LT_S,
-                        OP_LT_U,
-                        OP_GT_S,
-                        OP_GT_U,
-                        OP_LE_S,
-                        OP_LE_U,
-                        OP_GE_S,
-                        OP_GE_U,
-                        OP_AND,
-                        OP_OR,
-                        OP_XOR,
-                        OP_SHL,
-                        OP_SHR_S,
-                        OP_SHR_U,
-                        OP_ROTL,
-                        OP_ROTR,
-                    )
-                    or opcode in (OP_EQZ, OP_CLZ, OP_CTZ, OP_POPCNT, OP_ABS, OP_NEG)
-                    or opcode == OP_SELECT
-                ):
-                    stack_embs_list.append(embed_stack_entry(new_sp, top, write_count))
-                    write_count += 1
-                elif opcode == OP_SWAP:
-                    stack_embs_list.append(embed_stack_entry(sp, val_b, write_count))
-                    write_count += 1
-                    stack_embs_list.append(
-                        embed_stack_entry(sp - 1, val_a, write_count),
-                    )
-                    write_count += 1
-                elif opcode == OP_ROT:
-                    stack_embs_list.append(embed_stack_entry(sp, val_c, write_count))
-                    write_count += 1
-                    stack_embs_list.append(
-                        embed_stack_entry(sp - 1, val_a, write_count),
-                    )
-                    write_count += 1
-                    stack_embs_list.append(
-                        embed_stack_entry(sp - 2, val_b, write_count),
-                    )
-                    write_count += 1
-                elif opcode == OP_LOCAL_GET:
-                    stack_embs_list.append(embed_stack_entry(new_sp, top, write_count))
-                    write_count += 1
-                elif opcode in (OP_LOCAL_SET, OP_LOCAL_TEE):
-                    local_embs_list.append(
-                        embed_local_entry(locals_base + arg, val_a, local_write_count),
-                    )
-                    local_write_count += 1
-                elif opcode == OP_I32_LOAD or opcode in (
-                    OP_I32_LOAD8_U,
-                    OP_I32_LOAD8_S,
-                    OP_I32_LOAD16_U,
-                    OP_I32_LOAD16_S,
-                ):
-                    stack_embs_list.append(embed_stack_entry(new_sp, top, write_count))
-                    write_count += 1
-                elif opcode == OP_I32_STORE:
-                    heap_embs_list.append(
-                        embed_heap_entry(int(val_b), val_a, heap_write_count),
-                    )
-                    heap_write_count += 1
-                elif opcode == OP_I32_STORE8:
-                    heap_embs_list.append(
-                        embed_heap_entry(
-                            int(val_b),
-                            int(val_a) & 0xFF,
-                            heap_write_count,
-                        ),
-                    )
-                    heap_write_count += 1
-                elif opcode == OP_I32_STORE16:
-                    heap_embs_list.append(
-                        embed_heap_entry(
-                            int(val_b),
-                            int(val_a) & 0xFFFF,
-                            heap_write_count,
-                        ),
-                    )
-                    heap_write_count += 1
-                elif opcode == OP_CALL:
-                    call_stack.append((ip + 1, sp, locals_base))
-                    call_embs_list.append(
-                        embed_call_frame(
-                            len(call_stack) - 1,
-                            ip + 1,
-                            sp,
-                            locals_base,
-                            call_write_count,
-                        ),
-                    )
-                    call_write_count += 1
-                    locals_base = len(local_embs_list)
-                    trace.steps.append(TraceStep(opcode, arg, sp, top))
-                    ip = arg
-                    continue
-                elif opcode == OP_RETURN:
-                    if not call_stack:
-                        trace.steps.append(TraceStep(OP_TRAP, 0, sp, 0))
-                        break
-                    ret_val = val_a
-                    ret_addr, saved_sp, saved_locals_base = call_stack.pop()
-                    sp = saved_sp + 1
-                    stack_embs_list.append(embed_stack_entry(sp, ret_val, write_count))
-                    write_count += 1
-                    locals_base = saved_locals_base
-                    trace.steps.append(TraceStep(opcode, arg, sp, int(ret_val)))
-                    ip = ret_addr
+                if fwd.opcode == OP_CALL:
+                    self._handle_call(fwd, state, trace)
                     continue
 
-                trace.steps.append(TraceStep(opcode, arg, new_sp, top))
-                sp = new_sp
+                if fwd.opcode == OP_RETURN:
+                    if self._handle_return(fwd, state, trace):
+                        continue
+                    break
 
-                if opcode == OP_JZ:
-                    ip = arg if cond_val == 0 else ip + 1
-                elif opcode == OP_JNZ:
-                    ip = arg if cond_val != 0 else ip + 1
-                else:
-                    ip += 1
+                self._apply_memory_writes(fwd, state)
+                state.sp += fwd.sp_delta
+                trace.steps.append(
+                    TraceStep(fwd.opcode, fwd.arg, state.sp, fwd.top),
+                )
+                state.ip = self._next_ip(fwd.opcode, fwd.arg, fwd.val_a, state.ip)
 
         return trace
+
+    @staticmethod
+    def _build_mem(state: _ExecState) -> _MemoryEmbs:
+        """Build memory embedding tensors from accumulated lists."""
+        return (
+            _stack_or_empty(state.stack_embs),
+            _stack_or_empty(state.local_embs),
+            _stack_or_empty(state.heap_embs),
+            _stack_or_empty(state.call_embs),
+        )
+
+    def _forward_step(
+        self,
+        query: torch.Tensor,
+        prog_embs: torch.Tensor,
+        mem: _MemoryEmbs,
+        locals_base: int,
+    ) -> _ForwardResult:
+        """Run one model forward pass and return structured results."""
+        (
+            opcode,
+            arg,
+            sp_delta,
+            top,
+            _,
+            val_a,
+            val_b,
+            val_c,
+            _local_val,
+            _heap_val,
+        ) = self.model.forward(query, prog_embs, mem, locals_base)
+        return _ForwardResult(opcode, arg, sp_delta, top, val_a, val_b, val_c)
+
+    @staticmethod
+    def _apply_memory_writes(fwd: _ForwardResult, state: _ExecState) -> None:
+        """Apply memory mutations for non-control-flow opcodes."""
+        new_sp = state.sp + fwd.sp_delta
+
+        if fwd.opcode in _PUSH_RESULT_OPS:
+            state.stack_embs.append(
+                embed_stack_entry(new_sp, fwd.top, state.write_count),
+            )
+            state.write_count += 1
+        elif fwd.opcode == OP_SWAP:
+            state.stack_embs.append(
+                embed_stack_entry(state.sp, fwd.val_b, state.write_count),
+            )
+            state.write_count += 1
+            state.stack_embs.append(
+                embed_stack_entry(state.sp - 1, fwd.val_a, state.write_count),
+            )
+            state.write_count += 1
+        elif fwd.opcode == OP_ROT:
+            state.stack_embs.append(
+                embed_stack_entry(state.sp, fwd.val_c, state.write_count),
+            )
+            state.write_count += 1
+            state.stack_embs.append(
+                embed_stack_entry(state.sp - 1, fwd.val_a, state.write_count),
+            )
+            state.write_count += 1
+            state.stack_embs.append(
+                embed_stack_entry(state.sp - 2, fwd.val_b, state.write_count),
+            )
+            state.write_count += 1
+        elif fwd.opcode in _LOCAL_WRITE_OPS:
+            state.local_embs.append(
+                embed_local_entry(
+                    state.locals_base + fwd.arg,
+                    fwd.val_a,
+                    state.local_write_count,
+                ),
+            )
+            state.local_write_count += 1
+        elif fwd.opcode in _I32_STORE_MASKS:
+            mask = _I32_STORE_MASKS[fwd.opcode]
+            store_val = int(fwd.val_a) & mask if mask != MASK32 else fwd.val_a
+            state.heap_embs.append(
+                embed_heap_entry(int(fwd.val_b), store_val, state.heap_write_count),
+            )
+            state.heap_write_count += 1
+
+    @staticmethod
+    def _handle_call(
+        fwd: _ForwardResult,
+        state: _ExecState,
+        trace: Trace,
+    ) -> None:
+        """Handle CALL opcode: push frame and jump."""
+        state.call_stack.append((state.ip + 1, state.sp, state.locals_base))
+        state.call_embs.append(
+            embed_call_frame(
+                len(state.call_stack) - 1,
+                state.ip + 1,
+                state.sp,
+                state.locals_base,
+                state.call_write_count,
+            ),
+        )
+        state.call_write_count += 1
+        state.locals_base = len(state.local_embs)
+        trace.steps.append(TraceStep(fwd.opcode, fwd.arg, state.sp, fwd.top))
+        state.ip = fwd.arg
+
+    @staticmethod
+    def _handle_return(
+        fwd: _ForwardResult,
+        state: _ExecState,
+        trace: Trace,
+    ) -> bool:
+        """Handle RETURN opcode. Returns True to continue, False to break (TRAP)."""
+        if not state.call_stack:
+            trace.steps.append(TraceStep(OP_TRAP, 0, state.sp, 0))
+            return False
+        ret_addr, saved_sp, saved_locals_base = state.call_stack.pop()
+        state.sp = saved_sp + 1
+        state.stack_embs.append(
+            embed_stack_entry(state.sp, fwd.val_a, state.write_count),
+        )
+        state.write_count += 1
+        state.locals_base = saved_locals_base
+        trace.steps.append(
+            TraceStep(fwd.opcode, fwd.arg, state.sp, int(fwd.val_a)),
+        )
+        state.ip = ret_addr
+        return True
+
+    @staticmethod
+    def _next_ip(opcode: int, arg: int, val_a: int, ip: int) -> int:
+        """Compute the next instruction pointer after the given opcode."""
+        if opcode == OP_JZ:
+            return arg if val_a == 0 else ip + 1
+        if opcode == OP_JNZ:
+            return arg if val_a != 0 else ip + 1
+        return ip + 1

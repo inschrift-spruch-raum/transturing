@@ -24,11 +24,17 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .isa import Instruction
+from .isa import OP_JNZ, OP_JZ, Instruction
+from .isa import program as _make_prog
 from .wat_parser import parse_wat
+
+if TYPE_CHECKING:
+    from transturing.backends.numpy_backend import NumPyExecutor
 
 # ─── Unsupported WASM features ────────────────────────────────────
 
@@ -251,26 +257,32 @@ def compile_c_to_wat(
             for arg in reversed(extra_clang_args):
                 clang_cmd.insert(idx, arg)
 
-        result = subprocess.run(  # noqa: S603, PLW1510
-            clang_cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            msg = f"clang compilation failed:\n{result.stderr}"
-            raise RuntimeError(msg)
+        try:
+            result = subprocess.run(  # noqa: S603
+                clang_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                shell=False,
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            msg = f"clang compilation failed:\n{e.stderr}"
+            raise RuntimeError(msg) from e
 
         # WASM → WAT via wasm2wat
-        result = subprocess.run(  # noqa: S603, PLW1510
-            [wasm2wat_path, wasm_path],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            msg = f"wasm2wat conversion failed:\n{result.stderr}"
-            raise RuntimeError(msg)
+        try:
+            result = subprocess.run(  # noqa: S603
+                [wasm2wat_path, wasm_path],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                shell=False,
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            msg = f"wasm2wat conversion failed:\n{e.stderr}"
+            raise RuntimeError(msg) from e
 
         return result.stdout
 
@@ -355,8 +367,6 @@ def compile_c(
     # to pop arguments from the stack into locals in reverse order
     # (stack is LIFO: last arg is on top).
     if n_params > 0:
-        from .isa import program as make_prog  # noqa: PLC0415
-
         # Initialize any extra locals to 0 (WASM semantics: locals default to 0)
         init_instrs: list[tuple[str, int]] = []
         for i in range(n_locals):
@@ -364,7 +374,7 @@ def compile_c(
         # Pop args from stack into locals (reverse order: top of stack = last param)
         init_instrs.extend(("LOCAL.SET", i) for i in range(n_params - 1, -1, -1))
 
-        setup = make_prog(*init_instrs)
+        setup = _make_prog(*init_instrs)
         # Fix: offset all jump targets in prog by len(setup)
         prog = _offset_jumps(setup, prog)
 
@@ -381,8 +391,6 @@ def _offset_jumps(
     Jump instructions (JZ, JNZ) in body have absolute addresses that
     need to be shifted by len(prefix).
     """
-    from .isa import OP_JNZ, OP_JZ  # noqa: PLC0415
-
     offset = len(prefix)
     adjusted: list[Instruction] = []
     for instr in body:
@@ -461,12 +469,10 @@ def compile_and_run(
     """
     from transturing.backends.numpy_backend import NumPyExecutor  # noqa: PLC0415
 
-    from .isa import program as make_prog  # noqa: PLC0415
-
     prog = compile_c(source, func_name=func_name, opt_level=opt_level)
 
     # Prepend argument pushes (WASM calling convention: args on stack)
-    arg_instrs = make_prog(*[("PUSH", a) for a in args])
+    arg_instrs = _make_prog(*[("PUSH", a) for a in args])
     full_prog = _offset_jumps(arg_instrs, prog)
 
     trace = NumPyExecutor().execute(full_prog, max_steps=max_steps)
@@ -475,78 +481,90 @@ def compile_and_run(
 
 # ─── Self-test / main ─────────────────────────────────────────────
 
+_ADD_SRC = "int add(int a, int b) { return a + b; }"
 
-def main() -> None:  # noqa: PLR0915
-    """Run the C pipeline self-tests."""
-    import sys  # noqa: PLC0415
+_FACT_SRC = """
+int factorial(int n) {
+    if (n <= 1) return 1;
+    return n * factorial(n - 1);
+}
+"""
 
-    if not _has_toolchain():
-        tools: dict[str, str | None] = _check_toolchain()
-        [k for k, v in tools.items() if v is None]
-        sys.exit(0)
+_COLLATZ_SRC = """
+int collatz_steps(int n) {
+    int steps = 0;
+    while (n != 1) {
+        if (n % 2 == 0) {
+            n = n / 2;
+        } else {
+            n = 3 * n + 1;
+        }
+        steps = steps + 1;
+    }
+    return steps;
+}
+"""
 
-    from transturing.backends.numpy_backend import NumPyExecutor  # noqa: PLC0415
 
-    from .isa import program as make_prog  # noqa: PLC0415
+def _check(_name: str, got: object, expected: object) -> tuple[int, int]:
+    """Return (1, 0) on match, (0, 1) on mismatch."""
+    if got == expected:
+        return (1, 0)
+    return (0, 1)
 
-    np_exec = NumPyExecutor()
+
+def _test_addition(np_exec: NumPyExecutor) -> tuple[int, int]:
+    """Test 1: Simple addition via compiled C."""
     passed = 0
     failed = 0
 
-    def check(_name: str, got: object, expected: object) -> None:
-        nonlocal passed, failed
-        if got == expected:
-            passed += 1
-        else:
-            failed += 1
+    prog = compile_c(_ADD_SRC, func_name="add")
 
-    # ── Test 1: Simple addition ──────────────────────────────────
-    add_src = "int add(int a, int b) { return a + b; }"
-
-    prog = compile_c(add_src, func_name="add")
-
-    # Verify add with 3 and 5 returns 8
-    full = _offset_jumps(make_prog(("PUSH", 3), ("PUSH", 5)), prog)
+    full = _offset_jumps(_make_prog(("PUSH", 3), ("PUSH", 5)), prog)
     trace = np_exec.execute(full)
-    check("add(3, 5)", trace.steps[-1].top, 8)
+    p, f = _check("add(3, 5)", trace.steps[-1].top, 8)
+    passed += p
+    failed += f
 
-    # Verify add with 100 and 200 returns 300
-    full = _offset_jumps(make_prog(("PUSH", 100), ("PUSH", 200)), prog)
+    full = _offset_jumps(_make_prog(("PUSH", 100), ("PUSH", 200)), prog)
     trace = np_exec.execute(full)
-    check("add(100, 200)", trace.steps[-1].top, 300)
+    p, f = _check("add(100, 200)", trace.steps[-1].top, 300)
+    passed += p
+    failed += f
 
-    # ── Test 2: Loop (Collatz steps) ─────────────────────────────
-    # Note: simple sum loops get strength-reduced to i64 Gauss formula
-    # by clang -O1. Collatz is non-linear so it compiles to a real loop.
-    collatz_src = """
-    int collatz_steps(int n) {
-        int steps = 0;
-        while (n != 1) {
-            if (n % 2 == 0) {
-                n = n / 2;
-            } else {
-                n = 3 * n + 1;
-            }
-            steps = steps + 1;
-        }
-        return steps;
-    }
-    """
-    prog = compile_c(collatz_src, func_name="collatz_steps", opt_level="-O1")
+    return (passed, failed)
 
-    # Collatz(6): 6→3→10→5→16→8→4→2→1 = 8 steps
-    result = compile_and_run(collatz_src, [6], func_name="collatz_steps")
-    check("collatz_steps(6)", result, 8)
 
-    # Collatz(1) = 0 steps
-    result = compile_and_run(collatz_src, [1], func_name="collatz_steps")
-    check("collatz_steps(1)", result, 0)
+def _test_collatz() -> tuple[int, int]:
+    """Test 2: Loop (Collatz steps) — non-linear so clang keeps the loop."""
+    passed = 0
+    failed = 0
 
-    # Collatz(27) = 111 steps (famous long sequence)
-    result = compile_and_run(collatz_src, [27], func_name="collatz_steps")
-    check("collatz_steps(27)", result, 111)
+    compile_c(_COLLATZ_SRC, func_name="collatz_steps", opt_level="-O1")
 
-    # ── Test 2b: Sum loop via manual WAT (demonstrates WAT path) ──
+    result = compile_and_run(_COLLATZ_SRC, [6], func_name="collatz_steps")
+    p, f = _check("collatz_steps(6)", result, 8)
+    passed += p
+    failed += f
+
+    result = compile_and_run(_COLLATZ_SRC, [1], func_name="collatz_steps")
+    p, f = _check("collatz_steps(1)", result, 0)
+    passed += p
+    failed += f
+
+    result = compile_and_run(_COLLATZ_SRC, [27], func_name="collatz_steps")
+    p, f = _check("collatz_steps(27)", result, 111)
+    passed += p
+    failed += f
+
+    return (passed, failed)
+
+
+def _test_sum_loop_wat(np_exec: NumPyExecutor) -> tuple[int, int]:
+    """Test 2b: Sum loop via manual WAT (demonstrates WAT path)."""
+    passed = 0
+    failed = 0
+
     loop_wat = """
     (func $sum_loop (param i32) (result i32)
       (local i32 i32)
@@ -575,8 +593,7 @@ def main() -> None:  # noqa: PLR0915
     )
     """
     raw_prog = parse_wat(loop_wat)
-    # Add parameter setup: init locals 1,2 to 0, then pop arg to local 0
-    setup = make_prog(
+    setup = _make_prog(
         ("PUSH", 0),
         ("LOCAL.SET", 1),
         ("PUSH", 0),
@@ -585,73 +602,134 @@ def main() -> None:  # noqa: PLR0915
     )
     prog = _offset_jumps(setup, raw_prog)
 
-    full = _offset_jumps(make_prog(("PUSH", 10)), prog)
+    full = _offset_jumps(_make_prog(("PUSH", 10)), prog)
     trace = np_exec.execute(full)
-    check("sum_loop(10)", trace.steps[-1].top, 45)
+    p, f = _check("sum_loop(10)", trace.steps[-1].top, 45)
+    passed += p
+    failed += f
 
-    full = _offset_jumps(make_prog(("PUSH", 5)), prog)
+    full = _offset_jumps(_make_prog(("PUSH", 5)), prog)
     trace = np_exec.execute(full)
-    check("sum_loop(5)", trace.steps[-1].top, 10)
+    p, f = _check("sum_loop(5)", trace.steps[-1].top, 10)
+    passed += p
+    failed += f
 
-    # ── Test 3: Recursive factorial ──────────────────────────────
-    fact_src = """
-    int factorial(int n) {
-        if (n <= 1) return 1;
-        return n * factorial(n - 1);
-    }
-    """
-    # clang -O1 turns tail-recursive factorial into a loop with locals,
-    # which is perfect for our ISA
-    prog = compile_c(fact_src, func_name="factorial", opt_level="-O1")
+    return (passed, failed)
 
-    # Verify factorial of 5 returns 120
-    full = _offset_jumps(make_prog(("PUSH", 5)), prog)
+
+def _test_factorial(np_exec: NumPyExecutor) -> tuple[int, int]:
+    """Test 3: Recursive factorial — clang -O1 turns it into a loop."""
+    passed = 0
+    failed = 0
+
+    prog = compile_c(_FACT_SRC, func_name="factorial", opt_level="-O1")
+
+    full = _offset_jumps(_make_prog(("PUSH", 5)), prog)
     trace = np_exec.execute(full)
-    check("factorial(5)", trace.steps[-1].top, 120)
+    p, f = _check("factorial(5)", trace.steps[-1].top, 120)
+    passed += p
+    failed += f
 
-    # Verify factorial of 1 returns 1
-    full = _offset_jumps(make_prog(("PUSH", 1)), prog)
+    full = _offset_jumps(_make_prog(("PUSH", 1)), prog)
     trace = np_exec.execute(full)
-    check("factorial(1)", trace.steps[-1].top, 1)
+    p, f = _check("factorial(1)", trace.steps[-1].top, 1)
+    passed += p
+    failed += f
 
-    # Verify factorial of 10 returns 3628800
-    full = _offset_jumps(make_prog(("PUSH", 10)), prog)
+    full = _offset_jumps(_make_prog(("PUSH", 10)), prog)
     trace = np_exec.execute(full)
-    check("factorial(10)", trace.steps[-1].top, 3628800)
+    p, f = _check("factorial(10)", trace.steps[-1].top, 3628800)
+    passed += p
+    failed += f
 
-    # ── Test 4: Unsupported features detection ───────────────────
+    return (passed, failed)
 
-    # Float code should fail in strict mode
+
+def _test_unsupported_features() -> tuple[int, int]:
+    """Test 4: Float code should fail in strict mode."""
     float_src = "float addf(float a, float b) { return a + b; }"
     try:
         compile_c(float_src, func_name="addf", strict=True)
-        failed += 1
     except ValueError as e:
         if "f32" in str(e).lower() or "float" in str(e).lower():
-            passed += 1
-        else:
-            failed += 1
+            return (1, 0)
+        return (0, 1)
+    else:
+        return (0, 1)
 
-    # ── Test 5: Auto-detect function name ────────────────────────
-    prog = compile_c(add_src)  # no func_name specified
-    full = _offset_jumps(make_prog(("PUSH", 7), ("PUSH", 8)), prog)
+
+def _test_auto_detect(np_exec: NumPyExecutor) -> tuple[int, int]:
+    """Test 5: Auto-detect function name when not specified."""
+    prog = compile_c(_ADD_SRC)
+    full = _offset_jumps(_make_prog(("PUSH", 7), ("PUSH", 8)), prog)
     trace = np_exec.execute(full)
-    check("auto-detect add(7, 8)", trace.steps[-1].top, 15)
+    return _check("auto-detect add(7, 8)", trace.steps[-1].top, 15)
 
-    # ── Test 6: compile_and_run convenience ──────────────────────
-    result = compile_and_run(add_src, [10, 20], func_name="add")
-    check("compile_and_run add(10, 20)", result, 30)
 
-    result = compile_and_run(fact_src, [7], func_name="factorial")
-    check("compile_and_run factorial(7)", result, 5040)
+def _test_compile_and_run() -> tuple[int, int]:
+    """Test 6: compile_and_run convenience function."""
+    passed = 0
+    failed = 0
 
-    # ── Test 7: compile_c_to_wat (intermediate) ──────────────────
-    wat = compile_c_to_wat(add_src)
-    check("WAT contains func $add", "$add" in wat, expected=True)
-    check("WAT is module", wat.strip().startswith("(module"), expected=True)
+    result = compile_and_run(_ADD_SRC, [10, 20], func_name="add")
+    p, f = _check("compile_and_run add(10, 20)", result, 30)
+    passed += p
+    failed += f
 
-    # ── Summary ──────────────────────────────────────────────────
-    if failed:
+    result = compile_and_run(_FACT_SRC, [7], func_name="factorial")
+    p, f = _check("compile_and_run factorial(7)", result, 5040)
+    passed += p
+    failed += f
+
+    return (passed, failed)
+
+
+def _test_compile_to_wat() -> tuple[int, int]:
+    """Test 7: compile_c_to_wat intermediate output."""
+    passed = 0
+    failed = 0
+
+    wat = compile_c_to_wat(_ADD_SRC)
+    p, f = _check("WAT contains func $add", "$add" in wat, expected=True)
+    passed += p
+    failed += f
+    p, f = _check("WAT is module", wat.strip().startswith("(module"), expected=True)
+    passed += p
+    failed += f
+
+    return (passed, failed)
+
+
+def main() -> None:
+    """Run the C pipeline self-tests."""
+    if not _has_toolchain():
+        tools: dict[str, str | None] = _check_toolchain()
+        [k for k, v in tools.items() if v is None]
+        sys.exit(0)
+
+    from transturing.backends.numpy_backend import NumPyExecutor  # noqa: PLC0415
+
+    np_exec = NumPyExecutor()
+
+    total_passed = 0
+    total_failed = 0
+
+    for runner in (
+        _test_addition,
+        _test_collatz,
+        _test_sum_loop_wat,
+        _test_factorial,
+        _test_unsupported_features,
+        _test_auto_detect,
+        _test_compile_and_run,
+        _test_compile_to_wat,
+    ):
+        args: tuple[object, ...] = (np_exec,) if runner.__code__.co_argcount > 0 else ()
+        p, f = runner(*args)
+        total_passed += p
+        total_failed += f
+
+    if total_failed:
         sys.exit(1)
 
 
