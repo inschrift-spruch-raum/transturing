@@ -5,12 +5,19 @@ Imports from the core package (transturing).
 Cross-validates NumPy vs PyTorch traces for internal consistency.
 """
 
-from collections.abc import Iterator
+from __future__ import annotations
+
+import importlib
+from typing import TYPE_CHECKING
 
 import pytest
 
-from transturing.backends.numpy_backend import NumPyExecutor
-from transturing.backends.torch_backend import TorchExecutor
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from transturing.backends.numpy_backend import NumPyExecutor
+    from transturing.backends.torch_backend import TorchExecutor
+
 from transturing.core.isa import (
     OP_AND,
     OP_DIV_S,
@@ -39,7 +46,7 @@ from transturing.core.isa import (
     Instruction,
     compare_traces,
 )
-from transturing.core.programs import (
+from transturing.core.programs import (  # pyright: ignore[reportMissingTypeStubs]
     ALL_TESTS,
     make_bit_extract,
     make_bitwise_binary,
@@ -79,13 +86,17 @@ from transturing.core.programs import (
 @pytest.fixture
 def np_exec() -> NumPyExecutor:
     """Create a NumPy executor instance."""
-    return NumPyExecutor()
+    pytest.importorskip("numpy")
+    module = importlib.import_module("transturing.backends.numpy_backend")
+    return module.NumPyExecutor()
 
 
 @pytest.fixture
 def pt_exec() -> TorchExecutor:
     """Create a PyTorch executor instance."""
-    return TorchExecutor()
+    pytest.importorskip("torch")
+    module = importlib.import_module("transturing.backends.torch_backend")
+    return module.TorchExecutor()
 
 
 # ---------------------------------------------------------------------------

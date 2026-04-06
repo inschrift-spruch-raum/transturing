@@ -37,6 +37,8 @@
 
 更准确地说：**通用执行器**的分发与寻址机制通过解析方式固定到模型结构中；而**具体程序**会被编译为 ISA 指令序列，再由这个执行器运行。前馈层负责操作码分发，注意力头则通过抛物线键编码完成内存寻址。
 
+当前主文档里的程序导入路径是 `.wasm -> compile_wasm() -> 既有 lowering -> ISA`。支持范围以当前已验证的 i32 子集为准；对外记录的 WebAssembly 工作流只描述这个二进制 `.wasm` 主路径。
+
 ### 栈操作
 
 | Opcode | Name | Description | Computing context |
@@ -137,8 +139,7 @@ core/abc.py            ExecutorBackend 抽象基类
 core/registry.py       后端发现（get_executor, list_backends）
 core/programs.py       测试程序与算法生成器
 core/assembler.py      WASM 风格结构化控制流 → 扁平 ISA 编译器
-core/wat_parser.py     WebAssembly 文本格式解析器
-core/c_pipeline.py     C → WAT → ISA 编译流程（依赖 clang + wasm2wat）
+core/c_pipeline.py     C → .wasm → ISA 主编译流程
 ```
 
 ### Backends (`src/transturing/backends/`)
@@ -166,7 +167,6 @@ exec_pt = get_executor('torch')
 ### 测试
 ```text
 tests/test_consolidated.py    执行器正确性 + 双后端一致性测试
-tests/test_wat_parser.py      WAT 解析器测试套件
 ```
 
 ### 其他

@@ -165,7 +165,7 @@ class NumPyExecutor(ExecutorBackend):
     local eps=1e-10 for recency bias.
     """
 
-    name: str = "numpy"
+    name: ClassVar[str] = "numpy"
 
     _DISPATCH: ClassVar[dict[int, str]] = {
         OP_PUSH: "_handle_push",

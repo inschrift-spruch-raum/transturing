@@ -26,10 +26,10 @@
 | `core/registry.py` | 61 | 后端注册表：`get_executor()` 工厂函数、`list_backends()` 发现函数、`register_backend()` 装饰器 |
 | `core/programs.py` | 706 | 测试程序生成器：30+ 个 `make_*` 函数（fib、multiply、gcd、factorial、位运算、select 等） |
 | `core/assembler.py` | 276 | WASM 风格结构化控制流编译器（block/loop/if/br/br_table → 扁平 ISA）。入口函数 `compile_structured()`，内部类 `_Assembler` |
-| `core/wat_parser.py` | 835 | WebAssembly 文本格式（WAT）解析器，完整支持 WAT 语法（S-表达式、折叠指令、多函数模块）。入口函数 `parse_wat()`，内部类 `_ParserState` |
-| `core/c_pipeline.py` | 737 | C → WAT → ISA 编译管线（需要 clang + wasm2wat）。入口函数 `compile_c()`、`compile_c_to_wat()`、`compile_and_run()` |
+| `core/c_pipeline.py` | 172 | C → `.wasm` → ISA 主编译管线。入口函数 `compile_c()`、`compile_c_to_wasm()`、`compile_and_run()` |
+| `core/wasm_binary.py` | 1014 | 最小 WebAssembly 二进制前端。解码当前已验证的 i32 子集, 并复用既有 lowering 语义。入口函数 `compile_wasm()`、`compile_wasm_module()`、`compile_wasm_function()`、`parse_wasm_binary()`、`parse_wasm_file()` |
 
-依赖方向：`isa.py` 是共享根模块。`programs.py` 和 `assembler.py` 均从 `isa.py` 导入。`wat_parser.py` 从 `isa.py` 和 `assembler.py` 导入。`c_pipeline.py` 从 `isa.py` 和 `wat_parser.py` 导入。
+依赖方向：`isa.py` 是共享根模块。`programs.py` 和 `assembler.py` 均从 `isa.py` 导入。`wasm_binary.py` 复用 `assembler.py` 的结构化 lowering 语义。`c_pipeline.py` 通过 `compile_wasm()` 走主路径。
 
 ---
 
@@ -53,7 +53,6 @@
 |------|------|------|
 | `tests/conftest.py` | 28 | pytest 配置：后端未安装时自动跳过测试 |
 | `tests/test_consolidated.py` | 621 | 集成测试：NumPy 执行器等价性、PyTorch 执行器等价性、双执行器交叉验证 |
-| `tests/test_wat_parser.py` | 523 | WAT 解析器测试套件：解析、编译、执行全链路验证 |
 
 每个测试都通过 `compare_traces()` 验证 NumPyExecutor 和 TorchExecutor 产生完全一致的执行轨迹。
 
@@ -62,10 +61,10 @@
 ## 编译工具链使用流程
 
 ```
-C 源码 → clang 编译为 WASM → wasm2wat 转 WAT 文本 → wat_parser 解析 → assembler 编译为扁平 ISA → executor 执行
+C 源码 → clang 编译为 .wasm → wasm_binary 最小前端 → 既有 lowering → 扁平 ISA → executor 执行
 ```
 
-编译工具链模块位于 `src/transturing/core/` 中。`c_pipeline.py` 依赖 `wat_parser.py` 和 `assembler.py`，形成完整的 C 到 ISA 编译管线。
+编译工具链模块位于 `src/transturing/core/` 中。`c_pipeline.py` 的主路径依赖 `wasm_binary.py` 和既有 lowering 逻辑。
 
 ---
 
@@ -79,7 +78,7 @@ C 源码 → clang 编译为 WASM → wasm2wat 转 WAT 文本 → wat_parser 解
 | `docs/architecture/compilation.md` | 编译流程：执行器权重如何固定，程序如何降到 ISA |
 | **指南** | |
 | `docs/guides/how-it-works.md` | 逐步跟踪一个 4 指令程序的执行过程 |
-| `docs/guides/writing-programs.md` | 程序编写指南：汇编器和 WAT 用法 |
+| `docs/guides/writing-programs.md` | 程序编写指南：指令、汇编器和二进制 `.wasm` 导入 |
 | **ISA 参考** | |
 | `docs/isa/index.md` | 55 操作码分类索引 |
 | `docs/isa/opcodes.md` | 操作码详解：语义、参数、执行行为 |

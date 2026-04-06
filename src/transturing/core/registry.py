@@ -1,22 +1,24 @@
 """Backend discovery and executor factory."""
 
+from __future__ import annotations
+
 import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .abc import ExecutorBackend
 
-_REGISTRY: dict[str, type["ExecutorBackend"]] = {}
+_REGISTRY: dict[str, type[ExecutorBackend]] = {}
 _LOADED: set[str] = set()
 
 
-def register_backend(cls: type["ExecutorBackend"]) -> type["ExecutorBackend"]:
+def register_backend(cls: type[ExecutorBackend]) -> type[ExecutorBackend]:
     """Register a backend class via decorator."""
     _REGISTRY[cls.name] = cls
     return cls
 
 
-def get_executor(name: str | None = None) -> "ExecutorBackend":
+def get_executor(name: str | None = None) -> ExecutorBackend:
     """
     Get an executor instance.
 

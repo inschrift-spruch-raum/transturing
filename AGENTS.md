@@ -20,8 +20,7 @@
 │       │   ├── registry.py       # 后端发现（get_executor, list_backends）
 │       │   ├── programs.py       # 测试程序 + 算法生成器（fib、mul、gcd 等）
 │       │   ├── assembler.py      # WASM 风格结构化控制流 → 扁平 ISA 编译器
-│       │   ├── wat_parser.py     # WebAssembly 文本格式解析器
-│       │   └── c_pipeline.py     # C → WAT → ISA 编译流程（需要 clang + wasm2wat）
+│       │   └── c_pipeline.py     # C → .wasm → ISA 主编译流程
 │       └── backends/             # 隔离的后端实现
 │           ├── __init__.py       # 仅文档字符串（保护动态导入）
 │           ├── numpy_backend.py  # NumPyExecutor（参考/演示实现）
@@ -29,7 +28,6 @@
 ├── tests/
 │   ├── conftest.py               # 当后端未安装时自动跳过测试
 │   ├── test_consolidated.py      # 执行器正确性 + 双后端一致性测试
-│   └── test_wat_parser.py        # WAT 解析器测试套件
 ├── docs/
 │   ├── architecture/             # overview.md、memory-model.md、compilation.md
 │   ├── isa/                      # index.md、opcodes.md
@@ -50,7 +48,6 @@
 | 理解某个 embedding | `src/transturing/backends/torch_backend.py` → `embed_*` 函数 | 配合 `core/isa.py` 中的 DIM 布局一起看 |
 | 调试执行轨迹 | `src/transturing/core/isa.py` → `compare_traces()` | 可逐步比较差异 |
 | 新增结构化控制流 | `src/transturing/core/assembler.py` | WASM 风格 block/loop/if/br |
-| 解析 WAT 文本 | `src/transturing/core/wat_parser.py` | 支持完整 WAT 语法 |
 | 使用后端 | `from transturing import get_executor` | `get_executor('numpy')` 或 `get_executor('torch')` |
 | 阅读文档 | `docs/` | 建议从 `docs/guides/how-it-works.md` 开始 |
 
@@ -71,7 +68,7 @@
 
 **抛物线编码：** `k = (2j, -j²)` 用于编码位置 `j`。点积注意力会在目标位置形成尖锐峰值。所有内存空间共用同一种编码方式。Float32 的上限大约只有 4K 索引；Float64 可扩展到 25M+。
 
-**导入图：** `core/isa.py` 是共享根节点。`programs.py` 和 `assembler.py` 都从 `isa.py` 导入；`wat_parser.py` 从 `isa.py` 与 `assembler.py` 同时导入；`c_pipeline.py` 从 `isa.py` 与 `wat_parser.py` 导入；后端统一通过 `from transturing.core.isa import ...` 从 core 层导入；外部使用者应通过 `from transturing.X import ...` 导入。
+**导入图：** `core/isa.py` 是共享根节点。`programs.py` 和 `assembler.py` 都从 `isa.py` 导入；`wasm_binary.py` 复用既有 lowering 语义；`c_pipeline.py` 通过 `compile_wasm()` 走主路径；后端统一通过 `from transturing.core.isa import ...` 从 core 层导入；外部使用者应通过 `from transturing.X import ...` 导入。
 
 ## 阶段
 
@@ -163,4 +160,4 @@ uv sync --locked
 - **项目配置：** `[tool.uv]` 中 `package = true`，使用 src 布局；构建后端是 hatchling。`uv sync` 会以 editable mode 安装本包。
 - **锁文件：** `uv.lock` 已提交，用于可复现依赖解析。执行 `uv sync` 即可按锁文件安装。
 - **文件阅读：** 大文件先从 `docs/reference/api.md` 看函数索引，或从 `docs/reference/file-map.md` 看文件导航。对 >500 行文件，使用“先索引、再定点阅读”的模式。
-- **C pipeline 依赖：** 需要带 wasm32 target 支持的 `clang` 以及 `wasm2wat`。缺失时会抛出 `EnvironmentError`。
+- **C pipeline 依赖：** 主路径只需要带 wasm32 target 支持的 `clang`。当前记录的 WebAssembly 支持范围只覆盖已验证的 i32 子集。

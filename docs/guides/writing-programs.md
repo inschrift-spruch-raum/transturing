@@ -1,6 +1,8 @@
 # 程序编写指南
 
-本文介绍如何为 transturing 执行器编写程序。涵盖三种方式: 直接构造指令列表、使用结构化汇编器、以及解析 WAT 文本格式。
+本文介绍如何为 transturing 执行器编写程序。涵盖三种方式: 直接构造指令列表、使用结构化汇编器、以及导入二进制 `.wasm` 模块。
+
+如果你的起点是 WebAssembly 文件, 当前主路径是直接走 `.wasm -> compile_wasm() -> 既有 lowering -> ISA`。这里提到的 WebAssembly 支持范围只限于当前已验证的 i32 子集。
 
 关于执行器内部如何运行这些程序 (注意力头、抛物线编码等), 请参考 [工作原理](how-it-works.md)。完整的 55 个操作码定义见 [ISA 参考](../isa/index.md)。
 
@@ -244,82 +246,40 @@ prog = [
 
 ---
 
-## 方式三: WAT 解析器
+## 方式三: 导入二进制 `.wasm`
 
-`wat_parser.py` 可以解析 WebAssembly 文本格式 (WAT), 自动编译为指令列表:
+如果你的程序已经来自 C 编译器或其他 WebAssembly 工具链, 推荐直接导入二进制 `.wasm` 模块。当前公开 API 暴露了二进制解析和编译入口:
 
 ```python
-from transturing.core.wat_parser import parse_wat
+from pathlib import Path
+
+from transturing import compile_wasm, parse_wasm_binary, parse_wasm_file
 from transturing.backends.numpy_backend import NumPyExecutor
 ```
-
-`parse_wat(text, append_halt=True)` 返回 `List[Instruction]`, 可直接交给执行器运行。
 
 ### 基本用法
 
 ```python
-prog = parse_wat("""
-    i32.const 3
-    i32.const 5
-    i32.add
-""")
+wasm_bytes = Path("add.wasm").read_bytes()
+prog = compile_wasm(wasm_bytes, func_name="add")
 
 trace = NumPyExecutor().execute(prog)
-print(trace.steps[-1].top)    # 输出: 8
+print(trace.steps[-1].top)
 ```
 
-支持的 WAT 指令包括算术 (`i32.add`, `i32.sub`, `i32.mul` 等)、比较、位运算、局部变量 (`local.get/set/tee`)、内存操作、以及结构化控制流 (`block/loop/if/else/end/br/br_if`)。
+### 检查模块结构
 
-### 带控制流的 WAT
+如果你需要先查看导出的函数、内存或函数体结构, 可以先解析模块再选择入口函数:
 
 ```python
-prog = parse_wat("""
-    i32.const 10
-    loop $L
-      i32.const 1
-      i32.sub
-      dup
-      br_if 0
-    end
-""")
+module = parse_wasm_file("add.wasm")
+print([export.name for export in module.exports])
 
-trace = NumPyExecutor().execute(prog)
-print(trace.steps[-1].top)    # 输出: 0
+same_module = parse_wasm_binary(Path("add.wasm").read_bytes())
+prog = compile_wasm(same_module, func_name="add")
 ```
 
-WAT 中的 `block`/`loop`/`if`/`end` 会自动通过 `compile_structured()` 编译为平面指令。`br_if 0` 表示跳出 0 层 (最内层), 对 LOOP 来说就是回到循环起点。
-
-### 带函数的 WAT
-
-```python
-prog = parse_wat("""
-    (func $add (param i32 i32) (result i32)
-      local.get 0
-      local.get 1
-      i32.add
-    )
-""")
-
-trace = NumPyExecutor().execute(prog)
-# 函数参数通过 local.get 0/1 访问
-```
-
-WAT 解析器自动处理 `module`/`func` 包装、注释 (`;;` 行注释和 `(; ;)` 块注释)、十六进制常量 (`0xFF`) 等。
-
-### WAT 与汇编器的对应关系
-
-WAT 解析器内部调用 `compile_structured()`, 两者的控制流语义一致:
-
-| WAT | 汇编器元组 |
-|-----|-----------|
-| `block` | `('BLOCK',)` |
-| `loop $name` | `('LOOP',)` |
-| `if` / `else` / `end` | `('IF',)` / `('ELSE',)` / `('END',)` |
-| `br 0` | `('BR', 0)` |
-| `br_if 1` | `('BR_IF', 1)` |
-| `br_table 0 1 0` | `('BR_TABLE', [0, 1], 0)` |
-| `drop` | `('POP',)` |
-| `dup` | `('DUP',)` |
+这些入口都面向当前已验证的 i32 子集。binary frontend 会把 `.wasm` 模块解码为内部 Wasm 指令表示, 然后复用同一套结构化控制流映射与 ISA lowering 语义。
 
 ---
 

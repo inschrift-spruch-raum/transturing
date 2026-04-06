@@ -2,7 +2,7 @@
 
 核心 Python 类和函数的接口文档。项目分为两层子包：`src/transturing/core/`（零依赖核心：ISA 定义、类型、后端抽象、测试工具）和 `src/transturing/backends/`（隔离的后端实现：NumPy 和 PyTorch）。
 
-> **模块依赖图：** `core/isa.py` 是共享根模块。`programs.py` 和 `assembler.py` 均从 `isa.py` 导入。`wat_parser.py` 从 `isa.py` 和 `assembler.py` 导入。`c_pipeline.py` 从 `isa.py` 和 `wat_parser.py` 导入。后端通过 `from transturing.core.isa import ...` 引用核心模块。
+> **模块依赖图：** `core/isa.py` 是共享根模块。`programs.py` 和 `assembler.py` 均从 `isa.py` 导入。`wasm_binary.py` 复用既有 lowering 语义。`c_pipeline.py` 通过 `compile_wasm()` 走主路径。后端通过 `from transturing.core.isa import ...` 引用核心模块。
 
 ## 导入示例
 
@@ -11,7 +11,8 @@
 from transturing import (
     D_MODEL, MASK32, N_OPCODES, TOKENS_PER_STEP,
     Instruction, Trace, TraceStep,
-    compare_traces, get_executor, list_backends,
+    compare_traces, compile_wasm, compile_wasm_function, compile_wasm_module,
+    get_executor, list_backends, parse_wasm_binary, parse_wasm_file,
     program, test_algorithm, test_trap_algorithm,
 )
 
@@ -31,11 +32,16 @@ from transturing.backends.torch_backend import (
 # 核心模块导入:
 from transturing.core.isa import OP_PUSH, OP_ADD, OP_HALT, MASK32
 from transturing.core.assembler import compile_structured
-from transturing.core.wat_parser import parse_wat
+from transturing.core.wasm_binary import (
+    compile_wasm, compile_wasm_function, compile_wasm_module,
+    parse_wasm_binary, parse_wasm_file,
+)
 from transturing.core.programs import make_fibonacci, make_factorial
 from transturing.core.abc import ExecutorBackend
 from transturing.core.registry import get_executor, list_backends, register_backend
 ```
+
+对当前程序导入 API 来说, 主路径是二进制 `.wasm` 模块经由 `compile_wasm()` / `compile_wasm_module()` / `compile_wasm_function()` 以及 `parse_wasm_binary()` / `parse_wasm_file()` 进入既有 lowering 语义。当前记录的支持范围只覆盖已验证的 i32 子集。
 
 ---
 

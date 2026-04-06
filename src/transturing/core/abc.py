@@ -1,18 +1,18 @@
 """Abstract executor backend interface."""
 
-from abc import ABC, abstractmethod
+from __future__ import annotations
 
-from .isa import Instruction, Trace
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from .isa import Instruction, Trace
 
 
 class ExecutorBackend(ABC):
-    """
-    Abstract base class for all executor backends.
+    """Abstract base class for all executor backends."""
 
-    Both NumPyExecutor and TorchExecutor implement this interface.
-    """
-
-    name: str  # Class-level constant identifying the backend (e.g. 'numpy', 'torch')
+    name: ClassVar[str]  # Backend identifier (e.g. 'numpy', 'torch')
 
     @abstractmethod
     def execute(self, prog: list[Instruction], max_steps: int = 50000) -> Trace:

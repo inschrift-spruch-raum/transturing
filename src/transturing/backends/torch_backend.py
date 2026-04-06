@@ -1023,7 +1023,7 @@ class _ExecState:
 class TorchExecutor(ExecutorBackend):
     """Executes programs using CompiledModel."""
 
-    name: str = "torch"
+    name: ClassVar[str] = "torch"
 
     def __init__(self, model: CompiledModel | None = None) -> None:
         """Initialize with optional compiled model."""

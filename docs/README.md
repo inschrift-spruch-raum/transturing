@@ -2,7 +2,7 @@
 
 > 编译型 transformer 执行器, 程序在 transformer 自身的推理循环中运行。每条指令获取和内存读取都是一个抛物线注意力头。transformer **就是** 计算机。55 操作码 WASM 风格 ISA, Python 后端 (PyTorch/NumPy)。
 
-本项目独立验证了 [Percepta 的声明](https://percepta.ai/blog/can-llms-be-computers): 通过 2D 凸包注意力实现 O(log t) 的每步解码, transformer 能够执行任意程序。经过 20 个研究阶段的探索, 核心结论是"编译而非训练": **执行器的寻址/路由逻辑**需要通过解析方式写入模型结构, 而**具体程序**则编译为该执行器可运行的 ISA 指令序列（在 Torch 后端中进一步表现为程序内存 embedding）。
+本项目独立验证了 [Percepta 的声明](https://percepta.ai/blog/can-llms-be-computers): 通过 2D 凸包注意力实现 O(log t) 的每步解码, transformer 能够执行任意程序。经过 20 个研究阶段的探索, 核心结论是"编译而非训练": **执行器的寻址/路由逻辑**需要通过解析方式写入模型结构, 而**具体程序**则编译为该执行器可运行的 ISA 指令序列（在 Torch 后端中进一步表现为程序内存 embedding）。当前主入口是 `.wasm` 二进制模块经由最小 binary frontend 进入既有 lowering 语义, 再落到内部 ISA。当前记录的支持范围只涵盖已验证的 i32 子集。
 
 ## 关键数据
 
@@ -45,7 +45,7 @@
 | 文档 | 说明 |
 |------|------|
 | [工作原理](guides/how-it-works.md) | 逐步跟踪一个 4 指令程序的执行 |
-| [程序编写](guides/writing-programs.md) | 如何用汇编器和 WAT 编写程序 |
+| [程序编写](guides/writing-programs.md) | 如何用指令、汇编器和二进制 `.wasm` 导入路径编写程序 |
 
 ### 开发文档
 

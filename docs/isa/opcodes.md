@@ -1,6 +1,6 @@
 # 操作码详解
 
-本页对 ISA 中**复杂且常用**的操作码进行深入说明，包含栈效应图、Python 代码示例和典型用途。简单操作码见底部[快速参考](#快速参考)部分。
+本页对 ISA 中**复杂且常用**的操作码进行深入说明，包含栈效应图、Python 代码示例和典型用途。简单操作码见底部[快速参考](#快速参考)部分。示例默认面向直接 ISA 编程或二进制 `.wasm` 主导入路径编译后的程序。
 
 > 完整操作码列表请参阅 [index.md](index.md)。程序编写指南见 [../guides/writing-programs.md](../guides/writing-programs.md)。
 
@@ -496,4 +496,4 @@ def make_gcd(a, b):
 ## 相关文档
 
 - [index.md](index.md) — 55 个操作码的完整分类索引表
-- [../guides/writing-programs.md](../guides/writing-programs.md) — 使用汇编器和 WAT 格式编写程序
+- [../guides/writing-programs.md](../guides/writing-programs.md) — 使用汇编器和二进制 `.wasm` 导入路径编写程序
