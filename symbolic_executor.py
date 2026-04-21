@@ -40,21 +40,47 @@ Out of scope (file as follow-ups):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from fractions import Fraction
 from typing import Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 import isa
+from isa import _trunc_div, _trunc_rem
 
 
 # ─── Poly ──────────────────────────────────────────────────────────
 #
-# Polynomial over integer-indexed symbolic variables with integer
-# coefficients. Canonical form: terms is a dict keyed by a monomial
-# (tuple of (var_idx, power) pairs, sorted by var_idx, powers > 0).
-# The empty tuple `()` is the constant monomial. Zero-coefficient
-# terms are dropped on construction so comparisons are value-equal
-# when the polynomials are mathematically equal.
+# Polynomial over integer-indexed symbolic variables with rational
+# (``int`` or :class:`fractions.Fraction`) coefficients. Canonical form:
+# ``terms`` is a dict keyed by a monomial (tuple of (var_idx, power)
+# pairs, sorted by var_idx, powers > 0). The empty tuple ``()`` is the
+# constant monomial. Zero-coefficient terms are dropped on construction
+# so comparisons are value-equal when the polynomials are mathematically
+# equal.
+#
+# Rational coefficients land via issue #75 (symbolic DIV_S / REM_S): the
+# bilinear forms for ADD/SUB/MUL produce polynomials over ℤ, but DIV_S
+# introduces rational polynomials (``a/b`` with integer ``a, b``). To keep
+# one canonical type, coefficients accept ``int | Fraction`` and
+# normalise to ``int`` whenever the denominator is 1 — so every Poly
+# produced by ADD/SUB/MUL still has literal ``int`` coefficients and
+# existing structural-equality tests remain green.
 
 Monomial = Tuple[Tuple[int, int], ...]
+
+
+def _norm_coeff(c):
+    """Normalise a coefficient to ``int`` when integral, else ``Fraction``.
+
+    Accepts ``int`` or ``Fraction`` input. The canonical form keeps
+    integer coefficients as ``int`` so value-compare against the
+    pre-#75 Polys still works and ``repr`` output stays unchanged for
+    the ADD/SUB/MUL fragment.
+    """
+    if isinstance(c, Fraction):
+        if c.denominator == 1:
+            return int(c.numerator)
+        return c
+    return int(c)
 
 
 def _mono_mul(a: Monomial, b: Monomial) -> Monomial:
@@ -82,17 +108,20 @@ def _mono_str(mono: Monomial) -> str:
 
 @dataclass(frozen=True)
 class Poly:
-    """Multivariate polynomial with integer coefficients.
+    """Multivariate polynomial with rational coefficients.
 
-    `terms` maps a monomial (canonical-form tuple) to its coefficient.
-    Zero-coefficient entries are never stored.
+    ``terms`` maps a monomial (canonical-form tuple) to its coefficient,
+    which is ``int`` when the coefficient is integral and
+    :class:`fractions.Fraction` when the denominator is >1. Zero-
+    coefficient entries are never stored.
     """
 
-    terms: Mapping[Monomial, int]
+    terms: Mapping[Monomial, Union[int, Fraction]]
 
     @staticmethod
-    def _normalise(terms: Mapping[Monomial, int]) -> Dict[Monomial, int]:
-        return {m: int(c) for m, c in terms.items() if c != 0}
+    def _normalise(terms: Mapping[Monomial, Union[int, Fraction]]
+                   ) -> Dict[Monomial, Union[int, Fraction]]:
+        return {m: _norm_coeff(c) for m, c in terms.items() if c != 0}
 
     def __post_init__(self):
         # Freeze a normalised copy. Doing it this way so callers can pass
@@ -102,10 +131,10 @@ class Poly:
     # ── Constructors ──────────────────────────────────────────
 
     @classmethod
-    def constant(cls, c: int) -> "Poly":
+    def constant(cls, c: Union[int, Fraction]) -> "Poly":
         if c == 0:
             return cls({})
-        return cls({(): int(c)})
+        return cls({(): _norm_coeff(c)})
 
     @classmethod
     def variable(cls, idx: int) -> "Poly":
@@ -149,19 +178,22 @@ class Poly:
                 seen.add(v)
         return sorted(seen)
 
-    def eval_at(self, bindings: Mapping[int, int]) -> int:
-        """Substitute `bindings[i]` for each ``x_i`` and reduce to an int.
+    def eval_at(self, bindings: Mapping[int, int]) -> Union[int, Fraction]:
+        """Substitute ``bindings[i]`` for each ``x_i`` and reduce.
 
-        Missing variables raise KeyError — symbolic executors that emit
-        a variable per PUSH should pass one binding per PUSH.
+        Returns ``int`` when the result is integral (the common case for
+        ADD/SUB/MUL Polys), otherwise returns :class:`fractions.Fraction`
+        (after a DIV_S introduces a rational coefficient). Missing
+        variables raise ``KeyError`` — symbolic executors that emit a
+        variable per PUSH should pass one binding per PUSH.
         """
-        total = 0
+        total: Union[int, Fraction] = 0
         for mono, coeff in self.terms.items():
-            term = coeff
+            term: Union[int, Fraction] = coeff
             for v, p in mono:
                 term *= bindings[v] ** p
             total += term
-        return int(total)
+        return _norm_coeff(total)
 
     # ── Equality / display ────────────────────────────────────
 
@@ -201,6 +233,102 @@ class Poly:
             else:
                 out += f" + {p}"
         return out
+
+
+# ─── Rational + remainder forms (issue #75) ───────────────────────
+#
+# DIV_S / REM_S break out of the polynomial ring: integer division is
+# not polynomial, and even the underlying rational a/b lands outside
+# :class:`Poly` without coefficient generalisation. Per the issue's
+# design note ("Probably the latter, since WASM i32.div_s is truncating
+# and we can model the rational inside the ring while the i32 rounding
+# lives at the boundary"), we keep the symbolic form rational and apply
+# ``trunc_div`` / ``trunc_rem`` only at ``eval_at`` — the same boundary
+# pattern :func:`ff_symbolic.range_check` uses for i32 wrap on ADD/SUB/MUL.
+#
+# Two minimal types, one per op: :class:`RationalPoly` for DIV_S and
+# :class:`SymbolicRemainder` for REM_S. Algebra past the op itself is
+# deliberately not closed — the catalog rows this unblocks
+# (``native_divmod``, ``native_remainder``) consist of ``PUSH b; PUSH a;
+# DIV_S/REM_S; HALT``, so no composition with Poly arithmetic is
+# required. Composing DIV_S with further ADD/SUB/MUL would need a full
+# rational-function algebra, listed as a follow-up (the issue's
+# non-goal list calls this out explicitly).
+
+
+@dataclass(frozen=True)
+class RationalPoly:
+    """Symbolic quotient ``num / denom`` under WASM ``i32.div_s`` semantics.
+
+    Stores the two operand polynomials verbatim. ``eval_at`` reduces
+    them to integers under the given bindings and then applies
+    truncating-toward-zero division (:func:`isa._trunc_div`) — the same
+    semantic the compiled transformer's nonlinear path applies. Trapping
+    on ``denom == 0`` is the caller's responsibility at the bindings
+    site; ``eval_at`` raises :class:`ZeroDivisionError` in that case.
+
+    Structural equality is value-based on ``(num, denom)``, so two
+    symbolic executors that emit the same operand polys produce equal
+    tops — the equivalence test the issue asks for.
+    """
+    num: Poly
+    denom: Poly
+
+    def variables(self) -> List[int]:
+        return sorted(set(self.num.variables()) | set(self.denom.variables()))
+
+    def eval_at(self, bindings: Mapping[int, int]) -> int:
+        """Integer result: ``trunc(num(bindings) / denom(bindings))``.
+
+        ``denom`` evaluating to 0 raises :class:`ZeroDivisionError` — the
+        catalog's `native_divmod(0, b)` variants already produce a trap
+        in :class:`executor.NumPyExecutor` rather than a value, so the
+        symbolic side mirrors that failure mode.
+        """
+        n = self.num.eval_at(bindings)
+        d = self.denom.eval_at(bindings)
+        if d == 0:
+            raise ZeroDivisionError(
+                f"RationalPoly.eval_at: denom {self.denom!r} = 0 at bindings={dict(bindings)}"
+            )
+        return _trunc_div(int(n), int(d))
+
+    def __repr__(self) -> str:
+        return f"({self.num}) /ₜ ({self.denom})"
+
+
+@dataclass(frozen=True)
+class SymbolicRemainder:
+    """Symbolic remainder ``num % denom`` under WASM ``i32.rem_s`` semantics.
+
+    Stored as a ``(num, denom)`` pair rather than reduced to a closed
+    polynomial form, because ``b mod a`` is not rational in ``(a, b)``
+    — the truncation that defines it is piecewise, not algebraic.
+    ``eval_at`` applies :func:`isa._trunc_rem` at the boundary, matching
+    the compiled transformer.
+    """
+    num: Poly
+    denom: Poly
+
+    def variables(self) -> List[int]:
+        return sorted(set(self.num.variables()) | set(self.denom.variables()))
+
+    def eval_at(self, bindings: Mapping[int, int]) -> int:
+        n = self.num.eval_at(bindings)
+        d = self.denom.eval_at(bindings)
+        if d == 0:
+            raise ZeroDivisionError(
+                f"SymbolicRemainder.eval_at: denom {self.denom!r} = 0 at bindings={dict(bindings)}"
+            )
+        return _trunc_rem(int(n), int(d))
+
+    def __repr__(self) -> str:
+        return f"({self.num}) %ₜ ({self.denom})"
+
+
+# Union covering every "top of symbolic stack" type run_symbolic /
+# run_forking might emit for a branchless polynomial-plus-rational program.
+RationalStackValue = Union[Poly, RationalPoly, SymbolicRemainder]
 
 
 # ─── Guard + GuardedPoly ──────────────────────────────────────────
@@ -315,9 +443,14 @@ class GuardedPoly:
 
 # Opcodes the *branchless* fragment understands — preserved for the
 # legacy run_symbolic entry point that the original PoC tests exercise.
+# Issue #75 adds DIV_S / REM_S: they break the polynomial-ring closure
+# (outputs are :class:`RationalPoly` / :class:`SymbolicRemainder`) but
+# the executor still accepts them as long as nothing downstream tries to
+# compose a Poly op against a rational stack entry.
 _POLY_OPS = {
     isa.OP_PUSH, isa.OP_POP, isa.OP_DUP, isa.OP_HALT,
     isa.OP_ADD, isa.OP_SUB, isa.OP_MUL,
+    isa.OP_DIV_S, isa.OP_REM_S,
     isa.OP_SWAP, isa.OP_OVER, isa.OP_ROT, isa.OP_NOP,
 }
 # Branch ops the forking executor additionally handles.
@@ -330,15 +463,18 @@ _FORKING_OPS = _POLY_OPS | _BRANCH_OPS
 class SymbolicResult:
     """Outcome of running a program symbolically.
 
-    ``top`` is the polynomial left on top of the stack after HALT (or at
-    the end of the trace if HALT is absent). ``stack`` is the full final
-    stack (bottom at index 0). ``n_heads`` is the number of instructions
-    executed — the "k heads" the issue talks about. ``bindings`` maps the
-    allocated variable indices back to the original PUSH constants.
+    ``top`` is the top-of-stack value after HALT (or at the end of the
+    trace if HALT is absent). For the ADD/SUB/MUL fragment it's a
+    :class:`Poly`; for the DIV_S / REM_S rows added in issue #75 it can
+    also be :class:`RationalPoly` or :class:`SymbolicRemainder`. ``stack``
+    is the full final stack (bottom at index 0). ``n_heads`` is the
+    number of instructions executed — the "k heads" the issue talks
+    about. ``bindings`` maps the allocated variable indices back to the
+    original PUSH constants.
     """
 
-    top: Poly
-    stack: List[Poly]
+    top: RationalStackValue
+    stack: List[RationalStackValue]
     n_heads: int
     bindings: Dict[int, int]
 
@@ -346,10 +482,18 @@ class SymbolicResult:
         """k_heads ÷ n_monomials in the top expression, after simplification.
 
         Matches the issue's "9 heads → 1 monomial" style report. Returns
-        `inf` when the top collapses to zero (no monomials) — flagged by
-        callers who want a cleaner representation.
+        ``inf`` when the top collapses to zero (no monomials) — flagged
+        by callers who want a cleaner representation. For rational
+        outputs (DIV_S / REM_S) the denominator counts as an additional
+        monomial bundle; we sum the two sides' monomial counts to keep
+        the "one number" shape of the ratio.
         """
-        n = self.top.n_monomials()
+        if isinstance(self.top, Poly):
+            n = self.top.n_monomials()
+        elif isinstance(self.top, (RationalPoly, SymbolicRemainder)):
+            n = self.top.num.n_monomials() + self.top.denom.n_monomials()
+        else:
+            return float("inf")
         if n == 0:
             return float("inf")
         return self.n_heads / n
@@ -423,13 +567,44 @@ def run_symbolic(prog: List[isa.Instruction]) -> SymbolicResult:
             stack.append(stack[-1])
         elif op == isa.OP_ADD:
             b = _pop(); a = _pop()
+            if not isinstance(a, Poly) or not isinstance(b, Poly):
+                raise SymbolicOpNotSupported(
+                    "ADD on rational stack entries is out of scope "
+                    "(composition past one DIV_S/REM_S is a follow-up)"
+                )
             stack.append(a + b)
         elif op == isa.OP_SUB:
             b = _pop(); a = _pop()
+            if not isinstance(a, Poly) or not isinstance(b, Poly):
+                raise SymbolicOpNotSupported(
+                    "SUB on rational stack entries is out of scope "
+                    "(composition past one DIV_S/REM_S is a follow-up)"
+                )
             stack.append(a - b)
         elif op == isa.OP_MUL:
             b = _pop(); a = _pop()
+            if not isinstance(a, Poly) or not isinstance(b, Poly):
+                raise SymbolicOpNotSupported(
+                    "MUL on rational stack entries is out of scope "
+                    "(composition past one DIV_S/REM_S is a follow-up)"
+                )
             stack.append(a * b)
+        elif op == isa.OP_DIV_S:
+            b = _pop(); a = _pop()
+            if not isinstance(a, Poly) or not isinstance(b, Poly):
+                raise SymbolicOpNotSupported(
+                    "DIV_S on rational stack entries is out of scope "
+                    "(composition past one DIV_S/REM_S is a follow-up)"
+                )
+            stack.append(RationalPoly(num=a, denom=b))
+        elif op == isa.OP_REM_S:
+            b = _pop(); a = _pop()
+            if not isinstance(a, Poly) or not isinstance(b, Poly):
+                raise SymbolicOpNotSupported(
+                    "REM_S on rational stack entries is out of scope "
+                    "(composition past one DIV_S/REM_S is a follow-up)"
+                )
+            stack.append(SymbolicRemainder(num=a, denom=b))
         elif op == isa.OP_SWAP:
             if len(stack) < 2:
                 raise SymbolicStackUnderflow("swap needs 2 entries")
@@ -468,25 +643,38 @@ def run_symbolic(prog: List[isa.Instruction]) -> SymbolicResult:
 
 
 ArithFn = Callable[["Poly", "Poly"], "Poly"]
+DivFn = Callable[["Poly", "Poly"], "RationalPoly"]
+RemFn = Callable[["Poly", "Poly"], "SymbolicRemainder"]
 
 
 @dataclass(frozen=True)
 class ArithmeticOps:
-    """Three-operator spec the forking executor consumes for ADD/SUB/MUL.
+    """Operator spec the forking executor consumes for the arithmetic
+    fragment of the ISA.
 
     ``sub(a, b)`` must return ``a - b`` (executor computes ``a - b``
     where ``a`` is the second-from-top, matching the existing Poly
     order). ``ff_symbolic.symbolic_sub`` matches this spec.
+
+    ``div_s(a, b)`` / ``rem_s(a, b)`` (issue #75) must return the
+    symbolic quotient / remainder of ``a / b`` under WASM
+    ``i32.div_s`` / ``i32.rem_s`` semantics — ``a`` is stack[SP-1] (the
+    dividend) and ``b`` is top (the divisor), matching the numeric
+    path's ``_trunc_div(vb, va)`` convention (``executor.py:835-838``).
     """
     add: ArithFn
     sub: ArithFn
     mul: ArithFn
+    div_s: DivFn = None  # type: ignore[assignment]
+    rem_s: RemFn = None  # type: ignore[assignment]
 
 
 DEFAULT_ARITHMETIC_OPS = ArithmeticOps(
     add=lambda a, b: a + b,
     sub=lambda a, b: a - b,
     mul=lambda a, b: a * b,
+    div_s=lambda a, b: RationalPoly(num=a, denom=b),
+    rem_s=lambda a, b: SymbolicRemainder(num=a, denom=b),
 )
 
 
@@ -498,8 +686,17 @@ DEFAULT_MAX_PATHS = 64
 DEFAULT_MAX_STEPS = 50_000
 
 
-def _as_concrete_int(p: Poly) -> Optional[int]:
-    """Return integer value if ``p`` has no variables; else None."""
+def _as_concrete_int(p: "RationalStackValue") -> Optional[int]:
+    """Return integer value if ``p`` has no variables; else None.
+
+    Rational stack values (``RationalPoly`` / ``SymbolicRemainder``) never
+    collapse to a concrete int for branching purposes — DIV_S/REM_S past a
+    subsequent JZ/JNZ is out of scope for issue #75, so return ``None``
+    and let the caller fall into the symbolic-cond path (which will then
+    raise when it tries to wrap the value in a Guard).
+    """
+    if not isinstance(p, Poly):
+        return None
     if not p.terms:
         return 0
     if len(p.terms) == 1 and () in p.terms:
@@ -525,13 +722,13 @@ class _Path:
     static sites get distinct ids even across paths.
     """
     pc: int
-    stack: Tuple[Poly, ...]
+    stack: Tuple["RationalStackValue", ...]
     guards: Tuple[Guard, ...]
     bindings: Dict[int, int]
     n_heads: int = 0
     visited_branches: frozenset = field(default_factory=frozenset)
     loop_unrolled: bool = False  # True if this path ever took a back-edge
-    halted_top: Optional[Poly] = None
+    halted_top: Optional["RationalStackValue"] = None
 
     def with_(self, **kwargs) -> "_Path":
         """Return a copy with selected fields replaced."""
@@ -802,17 +999,18 @@ def run_forking(prog: List[isa.Instruction], *,
 
 def _apply_poly_op(path: _Path, instr: isa.Instruction,
                    input_mode: str,
-                   arithmetic_ops: ArithmeticOps = DEFAULT_ARITHMETIC_OPS) -> Tuple[Poly, ...]:
+                   arithmetic_ops: ArithmeticOps = DEFAULT_ARITHMETIC_OPS) -> Tuple[RationalStackValue, ...]:
     """Apply a non-branch opcode to ``path.stack`` and return the new stack.
 
-    ``arithmetic_ops`` picks the ADD/SUB/MUL implementations. Defaults to
-    Poly's native operators; :mod:`ff_symbolic` passes its bilinear-FF
+    ``arithmetic_ops`` picks the ADD/SUB/MUL/DIV_S/REM_S implementations.
+    Defaults to Poly's native operators (plus RationalPoly/SymbolicRemainder
+    wrappers for DIV_S/REM_S); :mod:`ff_symbolic` passes its bilinear-FF
     primitives.
     """
     op = instr.op
     stack = list(path.stack)
 
-    def _pop() -> Poly:
+    def _pop() -> RationalStackValue:
         if not stack:
             raise SymbolicStackUnderflow(f"pop from empty stack at pc={path.pc}")
         return stack.pop()
@@ -830,13 +1028,52 @@ def _apply_poly_op(path: _Path, instr: isa.Instruction,
         stack.append(stack[-1])
     elif op == isa.OP_ADD:
         b = _pop(); a = _pop()
+        if not isinstance(a, Poly) or not isinstance(b, Poly):
+            raise SymbolicOpNotSupported(
+                "ADD on rational stack entries is out of scope "
+                "(composition past one DIV_S/REM_S is a follow-up)"
+            )
         stack.append(arithmetic_ops.add(a, b))
     elif op == isa.OP_SUB:
         b = _pop(); a = _pop()
+        if not isinstance(a, Poly) or not isinstance(b, Poly):
+            raise SymbolicOpNotSupported(
+                "SUB on rational stack entries is out of scope "
+                "(composition past one DIV_S/REM_S is a follow-up)"
+            )
         stack.append(arithmetic_ops.sub(a, b))
     elif op == isa.OP_MUL:
         b = _pop(); a = _pop()
+        if not isinstance(a, Poly) or not isinstance(b, Poly):
+            raise SymbolicOpNotSupported(
+                "MUL on rational stack entries is out of scope "
+                "(composition past one DIV_S/REM_S is a follow-up)"
+            )
         stack.append(arithmetic_ops.mul(a, b))
+    elif op == isa.OP_DIV_S:
+        b = _pop(); a = _pop()
+        if not isinstance(a, Poly) or not isinstance(b, Poly):
+            raise SymbolicOpNotSupported(
+                "DIV_S on rational stack entries is out of scope "
+                "(composition past one DIV_S/REM_S is a follow-up)"
+            )
+        if arithmetic_ops.div_s is None:
+            raise SymbolicOpNotSupported(
+                "arithmetic_ops.div_s is not wired; pass a div_s primitive"
+            )
+        stack.append(arithmetic_ops.div_s(a, b))
+    elif op == isa.OP_REM_S:
+        b = _pop(); a = _pop()
+        if not isinstance(a, Poly) or not isinstance(b, Poly):
+            raise SymbolicOpNotSupported(
+                "REM_S on rational stack entries is out of scope "
+                "(composition past one DIV_S/REM_S is a follow-up)"
+            )
+        if arithmetic_ops.rem_s is None:
+            raise SymbolicOpNotSupported(
+                "arithmetic_ops.rem_s is not wired; pass a rem_s primitive"
+            )
+        stack.append(arithmetic_ops.rem_s(a, b))
     elif op == isa.OP_SWAP:
         if len(stack) < 2:
             raise SymbolicStackUnderflow(f"swap needs 2 entries at pc={path.pc}")
