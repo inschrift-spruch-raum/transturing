@@ -3,6 +3,7 @@ name = "transturing"
 version = "0.2.0"
 description = "Executor-only transformer runtime for supported WASM32 bytes, returning runtime traces/results from execution inside the transformer's own inference loop."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.14"
 authors = [
     { name = "Oskar Austegard" },
